@@ -22,11 +22,34 @@ free.groups = []
 const revisions = new Map(accounts.map(a => [a.id, 1]))
 const records = new Map(), handles = new Map(), starts = [], completes = []
 const disables = [], saves = [], credentials = new Map()
+const proxies = [{ id: 'proxy_default', endpoint: 'http://127.0.0.1:21001', enabled: true, revision: 1 }]
+const accountProxies = new Map()
+let proxyPageSize = 200, memberPageSize = 200, invalidProxyPage = false
+function pageOf(items, requested, size) {
+  return { items: items.slice((requested - 1) * size, requested * size), page: { page: requested, totalPages: Math.ceil(items.length / size) } }
+}
 function credential(a) {
   return { account_id: a.id, provider_id: 'openai', credential_revision: revisions.get(a.id), facts: { name: a.name, authentication_kind: 'oauth', material: { schema_version: 1, installation_id: '3d07c9c6-3b57-4a12-a51d-1e21df254477', transport: 'http', principal: { oauth_subject: 'original-subject', poid: null }, access_token: 'old-access', refresh_token: 'old-secret-rt', id_token: 'old-id', oauth_client_id: 'fixture', oauth_scope: 'openid', cookies: [{ name: 'fixture', value: 'fixture-cookie' }] }, email: a.email, upstream_user_id: a.userId, upstream_account_id: a.accountId, plan_type: a.planType, has_refresh_token: true, access_token_expires_at_ms: null, next_refresh_at_ms: null } }
 }
 let child, buffer, pending, ready, sequence = 99, errors = '', failComplete = false
-function send(meta, payload = Buffer.alloc(0)) { if (!Buffer.isBuffer(payload)) payload = Buffer.from(JSON.stringify(payload)); const json = Buffer.from(JSON.stringify(meta)), head = Buffer.alloc(12); head.writeUInt32BE(json.length); head.writeBigUInt64BE(BigInt(payload.length), 4); child.stdin.write(Buffer.concat([head, json, payload])) }
+function send(input, payload = Buffer.alloc(0)) {
+  if (!Buffer.isBuffer(payload)) payload = Buffer.from(JSON.stringify(payload))
+  const meta = structuredClone(input)
+  let data, request = Buffer.alloc(0)
+  if (meta.type === 'hello') { data = meta.handshake.configuration; delete meta.handshake.configuration }
+  else if (meta.type === 'call' || meta.type === 'callback') { data = meta.params; delete meta.params }
+  else if (meta.type === 'result') { data = meta.result; delete meta.result }
+  if (meta.type === 'call' && meta.context.request) {
+    request = Buffer.from(JSON.stringify(meta.context.request))
+    delete meta.context.request
+    meta.request_context_bytes = request.length
+  }
+  const encoded = data === undefined ? Buffer.alloc(0) : Buffer.from(JSON.stringify(data))
+  if (encoded.length) meta.data_bytes = encoded.length
+  const json = Buffer.from(JSON.stringify(meta)), head = Buffer.alloc(12)
+  head.writeUInt32BE(json.length); head.writeBigUInt64BE(BigInt(request.length + encoded.length + payload.length), 4)
+  child.stdin.write(Buffer.concat([head, json, request, encoded, payload]))
+}
 const result = (id, value = {}, payload) => send({ type: 'result', id, result: value }, payload)
 async function callback(meta, payload) {
   const data = payload.length ? JSON.parse(payload.toString()) : meta.params
@@ -66,7 +89,17 @@ async function callback(meta, payload) {
   if (meta.method === 'host.http.dispatch') {
     const url = new URL(meta.params.uri, 'http://mock.invalid')
     let dataReply, status = 200, code = 200
-    if (url.pathname === '/api/admin/accounts') { assert.equal(meta.params.method, 'GET'); dataReply = { items: accounts } }
+    if (url.pathname === '/api/admin/proxies') {
+      assert.equal(meta.params.method, 'GET'); assert.equal(url.searchParams.get('pageSize'), '200')
+      dataReply = pageOf(proxies, Number(url.searchParams.get('page')), proxyPageSize)
+      if (invalidProxyPage) dataReply.page.totalPages = 101
+    }
+    else if (url.pathname === '/api/admin/proxies/accounts') {
+      assert.equal(meta.params.method, 'GET'); assert.equal(url.searchParams.get('pageSize'), '200')
+      const members = accounts.filter(a => (accountProxies.get(a.id) ?? 'proxy_default') === url.searchParams.get('proxyId') && (a.email.includes(url.searchParams.get('search')) || a.name.includes(url.searchParams.get('search'))))
+      dataReply = pageOf(members, Number(url.searchParams.get('page')), memberPageSize)
+    }
+    else if (url.pathname === '/api/admin/accounts') { assert.equal(meta.params.method, 'GET'); dataReply = { items: accounts } }
     else if (url.pathname === '/api/admin/accounts/detail') { assert.equal(meta.params.method, 'GET'); dataReply = { account: accounts.find(a => a.id === url.searchParams.get('accountId')), credentialConfiguration: { transport: 'http' } } }
     else if (url.pathname === '/api/admin/accounts/export') {
       assert.equal(meta.params.method, 'GET'); assert.equal(url.searchParams.get('confirm'), 'export_sensitive_accounts')
@@ -97,8 +130,17 @@ function parse() {
   while (buffer.length >= 12) {
     const m = buffer.readUInt32BE(), p = Number(buffer.readBigUInt64BE(4)), total = 12 + m + p
     if (buffer.length < total) break
-    const meta = JSON.parse(buffer.subarray(12, 12 + m).toString()), payload = buffer.subarray(12 + m, total); buffer = buffer.subarray(total)
-    if (meta.type === 'ready') ready.resolve()
+    const meta = JSON.parse(buffer.subarray(12, 12 + m).toString())
+    const contextBytes = meta.request_context_bytes ?? 0, dataBytes = meta.data_bytes ?? 0
+    assert.ok(contextBytes + dataBytes <= p)
+    assert.ok(!('params' in meta) && !('result' in meta), 'RPC v4 business JSON must be outside control metadata')
+    const dataStart = 12 + m + contextBytes
+    if (meta.type === 'callback' || meta.type === 'result') {
+      assert.ok(dataBytes > 0, 'RPC v4 callbacks/results require a business JSON segment')
+      meta[meta.type === 'result' ? 'result' : 'params'] = JSON.parse(buffer.subarray(dataStart, dataStart + dataBytes).toString())
+    }
+    const payload = buffer.subarray(dataStart + dataBytes, total); buffer = buffer.subarray(total)
+    if (meta.type === 'ready') { assert.equal(meta.protocol_version, 4); ready.resolve() }
     else if (meta.type === 'callback') callback(meta, payload).catch(e => { ready.reject(e); for (const w of pending.values()) w.reject(e) })
     else { const w = pending.get(meta.id); if (w) { pending.delete(meta.id); if (meta.type === 'result') w.resolve({ result: meta.result, payload }); else w.reject(new Error(JSON.stringify(meta.error))) } }
   }
@@ -109,13 +151,14 @@ async function start() {
   child.stdout.on('data', data => { buffer = Buffer.concat([buffer, data]); parse() }); child.stderr.on('data', data => errors += data)
   child.on('error', e => ready.reject(e))
   child.on('exit', code => { if (code) { const e = new Error(`Plugin exit ${code}: ${errors}`); ready.reject(e); for (const w of pending.values()) w.reject(e) } })
-  send({ type: 'hello', handshake: { protocol_version: 2, artifact_sha256: 'a'.repeat(64), plugin_id: 'personal.reauth-manager', instance_id: 'test_instance', generation: 1, incarnation: 'fixture', configuration: {}, contributes: { management: { id: 'personal.reauth-manager.management', version: 1, stages: ['management'] }, maintenance: { id: 'personal.reauth-manager.maintenance', version: 1, stages: ['maintenance'] } } } })
+  send({ type: 'hello', handshake: { protocol_version: 4, artifact_sha256: 'a'.repeat(64), plugin_id: 'personal.reauth-manager', instance_id: 'test_instance', generation: 1, incarnation: 'fixture', configuration: {}, contributes: { management: { id: 'personal.reauth-manager.management', version: 2, stages: ['management'] }, maintenance: { id: 'personal.reauth-manager.maintenance', version: 1, stages: ['maintenance'] } } } })
   await ready.promise
 }
 async function stop() { const exited = new Promise(resolve => child.once('exit', resolve)); send({ type: 'shutdown' }); child.stdin.end(); await exited }
-async function call(method, params = {}, payload = Buffer.alloc(0), stage = 'management') {
+async function call(method, params = {}, payload = Buffer.alloc(0), stage = 'management', entry) {
   const id = sequence += 2, w = Promise.withResolvers(); pending.set(id, w)
-  send({ type: 'call', id, method, params, context: { call_id: id, instance_id: 'test_instance', generation: 1, incarnation: 'fixture', stage, timeout_ms: 60000, resource_stream: false, resource_scope_id: `scope_${id}` } }, payload)
+  const request = entry ?? (stage === 'management' ? { method: params.method, uri: `/plugin/${params.path}`, http_version: 'HTTP/1.1', headers: [{ name: 'authorization', value: Buffer.from('fixture-private-context').toString('base64') }], peer_addr: '127.0.0.1:12345', client_ip: '127.0.0.1' } : undefined)
+  send({ type: 'call', id, method, params, context: { call_id: id, instance_id: 'test_instance', generation: 1, incarnation: 'fixture', stage, timeout_ms: 60000, resource_stream: false, resource_scope_id: `scope_${id}`, ...(request ? { request } : {}) } }, payload)
   return Promise.race([w.promise, new Promise((_, reject) => setTimeout(() => reject(new Error(`Timeout ${method}`)), 10000).unref())])
 }
 async function request(path, data) { const r = await call('management.handle', { method: data === undefined ? 'GET' : 'POST', path: `api/${path}`, query: '', content_type: data === undefined ? null : 'application/json', headers: [] }, data === undefined ? Buffer.alloc(0) : data); return { status: r.result.status, value: JSON.parse(r.payload.toString()) } }
@@ -129,6 +172,10 @@ const check = name => { passed++; console.log(`PASS ${name}`) }
 try {
   await start()
   const reg = JSON.parse((await call('management.register', {}, Buffer.alloc(0), 'registration')).payload.toString()); assert.equal(reg.resources.length, 3); assert.equal(reg.routes.length, 8); assert.ok(!reg.resources.some(r => r.path.includes('runtime'))); check('Only UI resources are exposed, protocol runtime stays private')
+  const largeContext = { method: 'GET', uri: '/plugin/api/jobs', http_version: 'HTTP/1.1', headers: [{ name: 'x-fixture', value: Buffer.alloc(70000, 'x').toString('base64') }], peer_addr: null, client_ip: null }
+  const contextual = await call('management.handle', { method: 'GET', path: 'api/jobs', query: '', content_type: null, headers: [] }, Buffer.alloc(0), 'management', largeContext)
+  assert.equal(contextual.result.status, 200); assert.ok(!contextual.payload.includes('fixture-private-context')); check('RPC v4 carries large request context separately from metadata and business JSON')
+  await call('plugin.reconcile', {}, Buffer.alloc(0), 'maintenance'); check('Maintenance v1 runs without an entry request context under RPC v4')
   const beforeProbe = records.get('queue')?.value.jobs.length ?? 0; assert.deepEqual((await request('runtime-check', {})).value, { ready: true }); assert.equal(starts.length, 0); assert.equal(completes.length, 0); assert.equal(records.get('queue')?.value.jobs.length ?? 0, beforeProbe); check('Runtime preflight never queues an account or starts native authorization')
   const listing = await request('accounts'); assert.equal(listing.status, 200); assert.equal(listing.value.accounts.length, 11); assert.ok(listing.value.accounts.some(a => a.id === 'free')); assert.ok(!listing.value.accounts.some(a => ['api_key', 'other_provider'].includes(a.id))); for (const a of listing.value.accounts) { assert.ok(!('notes' in a)); assert.ok(!('refreshToken' in a)); assert.ok(!JSON.stringify(a).includes('fixture-password')) } check('All OpenAI OAuth plans including Free are listed without leaking credentials')
   assert.equal(listing.value.accounts.find(a => a.id === 'bad_notes').notesValid, false); check('Notes must match original account email')
@@ -140,6 +187,20 @@ try {
   await submit(['disabled']); assert.equal((await finish('disabled')).status, 'success'); assert.equal(accounts.find(a => a.id === 'disabled').enabled, false); check('Disabled account remains disabled after reauthorization')
   const freeBefore = structuredClone(free); const freeStarts = starts.length, freeCompletes = completes.length; await submit(['free']); assert.equal((await finish('free')).status, 'success'); assert.equal(starts.length, freeStarts + 1); assert.equal(completes.length, freeCompletes + 1); for (const k of ['id', 'enabled', 'groups', 'notes', 'outboundProxyEndpoint', 'name', 'accountId', 'planType']) assert.deepEqual(free[k], freeBefore[k]); check('Free account completes original-account authorization while preserving proxy and configuration')
   for (const id of ['missing_proxy', 'bad_notes', 'active', 'api_key', 'other_provider']) { const old = starts.length; await submit([id]); assert.equal((await finish(id)).status, 'failed'); assert.equal(starts.length, old) } check('Missing proxy, invalid notes, active requests and unsupported credentials stop before login')
+  const proxyAccount = id => { const a = make(id); accounts.push(a); revisions.set(id, 1); return a }
+  const offProxy = { ...proxies[0], id: 'proxy_disabled', enabled: false }; proxies.unshift(offProxy)
+  const exact = proxyAccount('proxy_exact_binding'); await submit([exact.id]); assert.equal((await finish(exact.id)).status, 'success'); check('Same endpoint with different proxy credentials is resolved by exact account membership')
+  const off = proxyAccount('proxy_disabled_account'); accountProxies.set(off.id, offProxy.id)
+  const beforeDisabled = starts.length; await submit([off.id]); assert.equal((await finish(off.id)).status, 'failed'); assert.match(job(off.id).message, /代理已禁用/); assert.equal(starts.length, beforeDisabled); check('Disabled managed proxy blocks login even while the account still exposes its endpoint')
+  const unknown = proxyAccount('proxy_unknown_binding'); accountProxies.set(unknown.id, 'unknown_proxy')
+  const beforeUnknown = starts.length; await submit([unknown.id]); assert.equal((await finish(unknown.id)).status, 'failed'); assert.equal(starts.length, beforeUnknown); check('Unknown proxy binding stops before native authorization')
+  const changedProxy = proxyAccount('proxy_revision_change'); await submit([changedProxy.id]); await tick(); proxies.find(p => p.id === 'proxy_default').revision++
+  const beforeProxyChange = completes.length; assert.equal((await finish(changedProxy.id)).status, 'review'); assert.equal(completes.length, beforeProxyChange); check('Proxy revision changes during login block stale credential writeback')
+  const disabledDuringLogin = proxyAccount('proxy_disabled_during_login'); await submit([disabledDuringLogin.id]); await tick(); proxies.find(p => p.id === 'proxy_default').enabled = false
+  const beforeProxyDisable = completes.length; assert.equal((await finish(disabledDuringLogin.id)).status, 'review'); assert.equal(completes.length, beforeProxyDisable); proxies.find(p => p.id === 'proxy_default').enabled = true; check('Proxy disabled during login blocks native completion without a direct fallback')
+  const paged = proxyAccount('proxy_paged', 'shared-proxy'); paged.email = accounts[0].email; paged.notes = accounts[0].notes
+  proxyPageSize = 1; memberPageSize = 1; await submit([paged.id]); assert.equal((await finish(paged.id)).status, 'success'); proxyPageSize = 200; memberPageSize = 200; check('Proxy catalog and exact account membership both traverse pagination')
+  const invalidPage = proxyAccount('proxy_invalid_page'); invalidProxyPage = true; const beforeInvalidPage = starts.length; await submit([invalidPage.id]); assert.equal((await finish(invalidPage.id)).status, 'failed'); assert.equal(starts.length, beforeInvalidPage); invalidProxyPage = false; check('Unbounded or malformed proxy pagination fails before login')
   await submit(['failed']); assert.equal((await finish('failed')).status, 'failed'); assert.match(job('failed').message, /密码/); check('Password rejection returns a safe actionable error')
   await submit(['changed']); await tick(); accounts.find(a => a.id === 'changed').enabled = false; const count = completes.length; assert.equal((await finish('changed')).status, 'review'); assert.equal(completes.length, count); check('Configuration changes during login block credential writeback')
   await submit(['credential_changed']); await tick(); revisions.set('credential_changed', 2); const previous = completes.length; assert.equal((await finish('credential_changed')).status, 'review'); assert.equal(completes.length, previous); check('Concurrent credential rotation blocks stale OAuth writeback')

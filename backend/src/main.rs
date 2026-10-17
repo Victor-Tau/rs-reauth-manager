@@ -2,6 +2,7 @@
 
 mod diagnostics;
 mod host;
+mod proxies;
 mod recovery;
 mod worker;
 
@@ -172,7 +173,7 @@ fn notes_valid(a: &Value) -> bool {
         && !notes.contains(['\r', '\n', '\0'])
 }
 fn settings(a: &Value) -> Value {
-    json!({"id":a["id"],"email":a["email"],"name":a["name"],"enabled":a["enabled"],"notes":a["notes"],"groups":a["groups"],"proxy":a["outboundProxyEndpoint"],"weight":a["weight"],"concurrencyLimit":a["concurrencyLimit"],"modelAccess":a["modelAccess"],"accountId":a["accountId"],"userId":a["userId"],"planType":a["planType"]})
+    json!({"id":a["id"],"email":a["email"],"name":a["name"],"enabled":a["enabled"],"notes":a["notes"],"groups":a["groups"],"proxy":a["outboundProxyEndpoint"],"proxyBinding":a["_proxyBinding"],"weight":a["weight"],"concurrencyLimit":a["concurrencyLimit"],"modelAccess":a["modelAccess"],"accountId":a["accountId"],"userId":a["userId"],"planType":a["planType"]})
 }
 fn require_idle(a: &Value) -> Result<(), PluginFault> {
     if a["capacity"]["usedSlots"].as_u64() != Some(0) {
@@ -209,6 +210,7 @@ async fn detail(host: &HostClient, id: &str) -> Result<Value, PluginFault> {
         return Err(fault("账号凭据版本匹配失败"));
     }
     a["_credentialRevision"] = runtime["credential_revision"].clone();
+    a["_proxyBinding"] = proxies::binding(host, &a).await?;
     Ok(a)
 }
 async fn proxy(host: &HostClient, a: &Value) -> Result<String, PluginFault> {
