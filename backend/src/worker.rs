@@ -18,6 +18,7 @@ use tokio::{
 pub struct Output {
     pub step: String,
     pub result: Option<Value>,
+    pub logs: Vec<crate::diagnostics::LogEntry>,
 }
 pub struct Worker {
     pub child: Child,
@@ -230,17 +231,36 @@ impl Runtime {
                     break;
                 };
                 match value["event"].as_str() {
+                    Some("diagnostic") => {
+                        if data.logs.len() < 96
+                            && let Some(entry) = crate::diagnostics::trace(&value["entry"])
+                        {
+                            data.logs.push(entry);
+                        }
+                    }
                     Some("step") => {
                         data.step = match value["step"].as_str() {
                             Some("session") => "session",
                             Some("login") => "login",
                             Some("mfa") => "mfa",
+                            Some("logout") => "logout",
                             _ => "running",
                         }
                         .into();
+                        if data.logs.len() < 96 {
+                            let message = match data.step.as_str() {
+                                "session" => "建立登录会话",
+                                "login" => "进入协议登录流程",
+                                "mfa" => "生成并提交 2FA 动态码",
+                                "logout" => "使用现有授权发送退出请求",
+                                _ => "协议进程正在处理",
+                            };
+                            data.logs.push(crate::diagnostics::lifecycle(message));
+                        }
                     }
                     Some(
-                        "complete" | "free_fallback" | "forced_workspace" | "forced_free" | "error",
+                        "complete" | "free_fallback" | "forced_workspace" | "forced_free"
+                        | "logout_complete" | "error",
                     ) => {
                         data.result = Some(value);
                         break;

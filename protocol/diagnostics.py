@@ -14,6 +14,7 @@ STAGES = {
     '/api/accounts/workspace/select': 'workspace',
     '/api/accounts/organization/select': 'organization',
     '/oauth/token': 'token_exchange',
+    '/backend-api/accounts/logout_all': 'logout',
 }
 REASONS = {
     'invalid_username_or_password': ('password', 'password_rejected'),
@@ -48,6 +49,8 @@ REASONS = {
 def stage_for_url(url):
     try:
         parsed = urlsplit(url)
+        if parsed.scheme == 'https' and parsed.netloc == 'chatgpt.com' and parsed.path == '/backend-api/accounts/logout_all':
+            return 'logout'
         if parsed.scheme != 'https' or parsed.netloc != 'auth.openai.com':
             return 'unknown'
         path = parsed.path

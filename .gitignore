@@ -8,6 +8,7 @@ __pycache__/
 .cache/
 .venv/
 *.log
+*.har
 *.env
 *.env.*
 !.env.example
@@ -23,3 +24,7 @@ verification/*
 !verification/bridge-test.mjs
 !verification/batch-test.mjs
 !verification/conventions.mjs
+
+!verification/ui-test.mjs
+!verification/test_logout.py
+!verification/test_consent.py

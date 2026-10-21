@@ -1,7 +1,10 @@
 //! 管理接口、授权队列与宿主生命周期的组合
 
+mod automation;
 mod diagnostics;
 mod host;
+mod importing;
+mod logout;
 mod proxies;
 mod recovery;
 mod worker;
@@ -36,25 +39,115 @@ struct Job {
     force_workspace_id: Option<String>,
     #[serde(default)]
     free_fallback: bool,
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    automatic: bool,
+    #[serde(default)]
+    logs: Vec<diagnostics::LogEntry>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct WorkspaceChoice {
     id: String,
 }
 impl Job {
+    fn queued(request_id: String, account_id: String, automatic: bool) -> Self {
+        Self {
+            request_id,
+            account_id,
+            status: "queued".into(),
+            step: "queued".into(),
+            message: String::new(),
+            started_at: None,
+            finished_at: None,
+            workspace_choices: vec![],
+            force_workspace_id: None,
+            free_fallback: false,
+            kind: "reauth".into(),
+            automatic,
+            logs: vec![diagnostics::lifecycle("任务已排队")],
+        }
+    }
     fn active(&self) -> bool {
         matches!(self.status.as_str(), "queued" | "running")
+    }
+    fn trim_logs(&mut self) {
+        let mut bytes: usize = self.logs.iter().map(|entry| entry.message.len()).sum();
+        while self.logs.len() > 100 || bytes > 12288 {
+            bytes -= self.logs.remove(0).message.len();
+        }
+    }
+    fn log(&mut self, message: &str) {
+        self.logs.push(diagnostics::lifecycle(message));
+        self.trim_logs();
     }
     fn finish(&mut self, status: &str, message: &str) {
         self.status = status.into();
         self.message = message.into();
         self.step = status.into();
         self.finished_at = Some(now());
+        self.log(message);
     }
 }
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Queue {
     jobs: Vec<Job>,
+    #[serde(default = "default_enabled")]
+    enabled: bool,
+    #[serde(default)]
+    automation: automation::Automation,
+    #[serde(default)]
+    last_scan_at: u64,
+    #[serde(default)]
+    auto_attempts: std::collections::BTreeMap<String, u64>,
+}
+fn trim_log_history(queue: &mut Queue) {
+    // 宿主单条私有状态上限为 256 KiB，按完整状态大小清理较早日志
+    for job in &mut queue.jobs {
+        job.trim_logs();
+    }
+    let mut size = serde_json::to_vec(queue).map_or(usize::MAX, |bytes| bytes.len());
+    for job in &mut queue.jobs {
+        if size <= 256 * 1024 {
+            break;
+        }
+        let bytes = serde_json::to_vec(&job.logs).map_or(2, |bytes| bytes.len());
+        job.logs.clear();
+        size = size.saturating_sub(bytes.saturating_sub(2));
+    }
+    // 大量工作区候选等元数据也计入额度，保留所有活动任务及自动重试阻止记录
+    while size > 256 * 1024 {
+        let Some(position) = queue.jobs.iter().position(|job| !job.active()) else {
+            break;
+        };
+        queue.jobs.remove(position);
+        size = serde_json::to_vec(queue).map_or(usize::MAX, |bytes| bytes.len());
+    }
+}
+fn trim_jobs(queue: &mut Queue) {
+    let mut completed = queue.jobs.iter().filter(|j| !j.active()).count();
+    queue.jobs.retain(|j| {
+        if !j.active() && completed > 100 {
+            completed -= 1;
+            false
+        } else {
+            true
+        }
+    });
+}
+fn default_enabled() -> bool {
+    true
+}
+impl Default for Queue {
+    fn default() -> Self {
+        Self {
+            jobs: vec![],
+            enabled: true,
+            automation: automation::Automation::default(),
+            last_scan_at: 0,
+            auto_attempts: Default::default(),
+        }
+    }
 }
 struct Manager {
     runtime: worker::Runtime,
@@ -69,8 +162,21 @@ struct Submit {
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LogoutSubmit {
+    account_ids: Vec<String>,
+    request_id: String,
+    confirmation: String,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Cancel {
     request_id: Option<String>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Config {
+    enabled: bool,
+    automation: Option<automation::Automation>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -120,7 +226,11 @@ fn registration() -> ManagementRegistration {
         routes: [
             ("GET", "api/accounts"),
             ("GET", "api/jobs"),
+            ("GET", "api/options"),
+            ("POST", "api/import"),
+            ("POST", "api/config"),
             ("POST", "api/submit"),
+            ("POST", "api/logout"),
             ("POST", "api/cancel"),
             ("POST", "api/tick"),
             ("POST", "api/runtime-check"),
@@ -149,7 +259,7 @@ fn registration() -> ManagementRegistration {
         pages: vec![ManagementPage {
             id: "reauth-manager".into(),
             title: "账号重新授权".into(),
-            description: Some("登录与授权记录".into()),
+            description: Some("重新授权、参数配置与账号导入".into()),
             entry: "web/index.html".into(),
             icon: None,
         }],
@@ -312,6 +422,11 @@ impl Manager {
         for job in &mut queue.jobs {
             if job.active() {
                 job.finish("interrupted", "插件进程已重启，请先检查原账号后手动重试");
+                if job.kind != "import" {
+                    queue
+                        .auto_attempts
+                        .insert(job.account_id.clone(), automation::BLOCKED);
+                }
                 changed = true;
             }
         }
@@ -324,13 +439,23 @@ impl Manager {
     async fn tick(&mut self, host: &HostClient) -> Result<(), PluginFault> {
         self.recover(host).await?;
         let (mut queue, version) = host::load(host).await?;
+        if !queue.enabled {
+            return Ok(());
+        }
+        if self.worker.is_none() && automation::scan(host, &mut queue).await? {
+            host::save(host, &queue, version).await?;
+            let loaded = host::load(host).await?;
+            queue = loaded.0;
+            return self.start_queued(host, queue, loaded.1).await;
+        }
         if let Some(mut current) = self.worker.take() {
-            let output = current
-                .output
-                .lock()
-                .map_err(|_| fault("协议结果读取失败"))?
-                .result
-                .take();
+            let (output, logs) = {
+                let mut data = current
+                    .output
+                    .lock()
+                    .map_err(|_| fault("协议结果读取失败"))?;
+                (data.result.take(), std::mem::take(&mut data.logs))
+            };
             let position = queue
                 .jobs
                 .iter()
@@ -339,8 +464,15 @@ impl Manager {
                 return Err(fault("任务状态发生冲突，已停止协议进程"));
             };
             let job = &mut queue.jobs[position];
+            job.logs.extend(logs);
+            job.trim_logs();
             if let Some(output) = output {
-                if output["event"] == "complete" {
+                job.log("协议进程已返回结果，开始核对账号与宿主操作");
+                if job.kind == "logout" {
+                    logout::finish(host, job, &current, &output).await;
+                } else if job.kind == "import" {
+                    importing::finish(host, job, &current, &output).await;
+                } else if output["event"] == "complete" {
                     if job.force_workspace_id.is_some() {
                         job.finish("review", "强制授权返回类型不匹配，未写回");
                         host::save(host, &queue, version).await?;
@@ -415,7 +547,14 @@ impl Manager {
                     }
                 }
             } else if now().saturating_sub(current.started) > 420000 {
-                job.finish("failed", "协议登录超时，未自动重试");
+                if job.kind == "logout" {
+                    job.finish(
+                        "review",
+                        "退出请求超时，结果未确认；请核对账号，不会自动重试或重登",
+                    );
+                } else {
+                    job.finish("failed", "协议登录超时，未自动重试");
+                }
             } else if current
                 .child
                 .try_wait()
@@ -424,7 +563,14 @@ impl Manager {
             {
                 // 子进程退出后，读取协程仍可能在处理最后一行
                 if now().saturating_sub(current.started) > 5000 {
-                    job.finish("failed", "协议进程已退出，未取得有效回调");
+                    if job.kind == "logout" {
+                        job.finish(
+                            "review",
+                            "退出进程已结束，结果未确认；请核对账号，不会自动重试或重登",
+                        );
+                    } else {
+                        job.finish("failed", "协议进程已退出，未取得有效回调");
+                    }
                 } else {
                     self.worker = Some(current);
                 }
@@ -437,21 +583,64 @@ impl Manager {
                     .clone();
                 self.worker = Some(current);
             }
-            host::save(host, &queue, version).await?;
+            let finished = &queue.jobs[position];
+            if finished.kind != "import" && finished.status == "review" {
+                queue
+                    .auto_attempts
+                    .insert(finished.account_id.clone(), automation::BLOCKED);
+            }
+            if finished.kind != "import"
+                && finished.kind != "logout"
+                && finished.status == "success"
+            {
+                queue
+                    .auto_attempts
+                    .insert(finished.account_id.clone(), now());
+            }
+            if finished.kind == "import" {
+                let (mut latest, revision) = host::load(host).await?;
+                if let Some(job) = latest
+                    .jobs
+                    .iter_mut()
+                    .find(|j| j.request_id == queue.jobs[position].request_id)
+                {
+                    *job = queue.jobs[position].clone();
+                }
+                host::save(host, &latest, revision).await?;
+            } else {
+                host::save(host, &queue, version).await?;
+            }
             return Ok(());
         }
+        self.start_queued(host, queue, version).await
+    }
+    async fn start_queued(
+        &mut self,
+        host: &HostClient,
+        mut queue: Queue,
+        version: Option<u64>,
+    ) -> Result<(), PluginFault> {
         if let Some(position) = queue.jobs.iter().position(|j| j.status == "queued") {
             let job = &mut queue.jobs[position];
             job.status = "running".into();
             job.step = "preparing".into();
             job.started_at = Some(now());
+            job.log("开始核对账号、代理、凭据版本及空闲状态");
+            if job.kind == "logout" {
+                queue
+                    .auto_attempts
+                    .insert(job.account_id.clone(), automation::BLOCKED);
+            }
             // 凭据发送前先持久化意图，中断任务不自动恢复
             host::save(host, &queue, version).await?;
             let result=async {
                 self.runtime.prepare().await?;
-                let job=&queue.jobs[position];let a=detail(host,&job.account_id).await?;
+                let job=&queue.jobs[position];
+                if job.kind == "logout" { return logout::start(&mut self.runtime, host, job).await }
+                let a=detail(host,&job.account_id).await?;
                 require_idle(&a)?;
                 if !notes_valid(&a){return Err(fault("备注须为与原账号邮箱一致的 邮箱----密码----2FA"))}
+                if job.automatic && (!queue.automation.enabled || !queue.automation.matches(&a)) { return Err(fault("账号已不符合自动授权条件，已跳过")) }
                 let proxy=proxy(host,&a).await?;
                 let start=admin(host,"POST","/api/admin/accounts/oauth/start",Some(json!({"provider":"openai","name":a["name"],"accountId":a["id"]}))).await?;
                 let flow=start["flowId"].as_str().ok_or_else(||fault("RS 授权流程无效"))?.to_owned();
@@ -462,7 +651,12 @@ impl Manager {
                 Ok(worker) => self.worker = Some(worker),
                 Err(error) => {
                     let (mut latest, version) = host::load(host).await?;
-                    latest.jobs[position].finish("failed", &error.message);
+                    let status = if latest.jobs[position].kind == "logout" {
+                        "review"
+                    } else {
+                        "failed"
+                    };
+                    latest.jobs[position].finish(status, &error.message);
                     host::save(host, &latest, version).await?;
                 }
             }
@@ -475,7 +669,14 @@ async fn handle(
     call: TypedCall<ManagementRequest>,
 ) -> Result<Value, PluginFault> {
     manager.recover(&call.host).await?;
-    if !call.request.query.is_empty() || call.payload.len() > 16384 {
+    if !call.request.query.is_empty()
+        || call.payload.len()
+            > if ["api/import", "api/config"].contains(&call.request.path.as_str()) {
+                131072
+            } else {
+                16384
+            }
+    {
         return Err(fault("插件请求参数无效"));
     }
     if call.request.method == "GET" {
@@ -484,8 +685,11 @@ async fn handle(
         }
         return match call.request.path.as_str() {
             "api/accounts" => rows(&call.host).await,
-            "api/jobs" => Ok(serde_json::to_value(host::load(&call.host).await?.0)
-                .map_err(|_| fault("任务编码失败"))?),
+            "api/options" => importing::options(&call.host).await,
+            "api/jobs" => {
+                let queue = host::load(&call.host).await?.0;
+                Ok(json!({"jobs":queue.jobs,"enabled":queue.enabled,"automation":queue.automation}))
+            }
             _ => Err(fault("路由不存在")),
         };
     }
@@ -506,11 +710,55 @@ async fn handle(
         manager.tick(&call.host).await?;
         return Ok(json!({"ok":true}));
     }
+    if call.request.path == "api/config" {
+        let request: Config =
+            serde_json::from_slice(&call.payload).map_err(|_| fault("插件开关参数无效"))?;
+        let (mut queue, version) = host::load(&call.host).await?;
+        if let Some(config) = request.automation {
+            config.validate()?;
+            queue.automation = config;
+            queue.last_scan_at = 0;
+            for job in &mut queue.jobs {
+                if job.automatic && job.status == "queued" {
+                    job.finish("cancelled", "自动授权配置已更新，排队任务已取消");
+                }
+            }
+        }
+        queue.enabled = request.enabled;
+        if !queue.enabled {
+            for job in &mut queue.jobs {
+                if job.active() {
+                    job.finish("cancelled", "插件已关闭，已停止队列");
+                }
+            }
+        }
+        host::save(&call.host, &queue, version).await?;
+        if !queue.enabled {
+            manager.worker.take();
+        }
+        return Ok(json!({"enabled":queue.enabled,"automation":queue.automation}));
+    }
     let (mut queue, version) = host::load(&call.host).await?;
     match call.request.path.as_str() {
-        "api/submit" => {
-            let request: Submit =
-                serde_json::from_slice(&call.payload).map_err(|_| fault("提交格式无效"))?;
+        "api/import" => {
+            return importing::submit(manager, &call.host, &call.payload, queue, version).await;
+        }
+        "api/submit" | "api/logout" => {
+            let logging_out = call.request.path == "api/logout";
+            let kind = if logging_out { "logout" } else { "reauth" };
+            let request: Submit = if logging_out {
+                let request: LogoutSubmit =
+                    serde_json::from_slice(&call.payload).map_err(|_| fault("退出请求格式无效"))?;
+                if request.confirmation != "logout_all_and_disable" {
+                    return Err(fault("请明确确认退出所有登录并停止调度"));
+                }
+                Submit {
+                    account_ids: request.account_ids,
+                    request_id: request.request_id,
+                }
+            } else {
+                serde_json::from_slice(&call.payload).map_err(|_| fault("提交格式无效"))?
+            };
             if uuid::Uuid::parse_str(&request.request_id).is_err()
                 || request.account_ids.is_empty()
                 || request.account_ids.len() > 100
@@ -530,12 +778,28 @@ async fn handle(
             {
                 return Err(fault("账号或请求标识无效"));
             }
+            if !queue.enabled {
+                return Err(fault("插件已关闭，请先打开插件开关"));
+            }
             let prefix = format!("{}:", request.request_id);
             if queue
                 .jobs
                 .iter()
                 .any(|job| job.request_id.starts_with(&prefix))
             {
+                let existing: Vec<_> = queue
+                    .jobs
+                    .iter()
+                    .filter(|j| j.request_id.starts_with(&prefix))
+                    .collect();
+                if existing.len() != request.account_ids.len()
+                    || existing.iter().any(|j| {
+                        j.kind != kind && !(kind == "reauth" && j.kind.is_empty())
+                            || !request.account_ids.contains(&j.account_id)
+                    })
+                {
+                    return Err(fault("任务标识已被其他操作使用"));
+                }
                 return Ok(json!({"jobs":queue.jobs}));
             }
             if request
@@ -570,10 +834,16 @@ async fn handle(
                     workspace_choices: vec![],
                     force_workspace_id: None,
                     free_fallback: false,
+                    kind: kind.into(),
+                    automatic: false,
+                    logs: vec![diagnostics::lifecycle("任务已排队")],
                 });
             }
         }
         "api/force-submit" => {
+            if !queue.enabled {
+                return Err(fault("插件已关闭，请先打开插件开关"));
+            }
             let request: ForceSubmit =
                 serde_json::from_slice(&call.payload).map_err(|_| fault("强制授权参数无效"))?;
             if request.confirmation != "replace_workspace_and_disable"
@@ -634,9 +904,15 @@ async fn handle(
                 workspace_choices: vec![],
                 force_workspace_id: Some(request.workspace_id),
                 free_fallback: false,
+                kind: "reauth".into(),
+                automatic: false,
+                logs: vec![diagnostics::lifecycle("任务已排队")],
             });
         }
         "api/free-fallback" => {
+            if !queue.enabled {
+                return Err(fault("插件已关闭，请先打开插件开关"));
+            }
             let request: FreeFallbackSubmit =
                 serde_json::from_slice(&call.payload).map_err(|_| fault("退回 Free 参数无效"))?;
             if request.confirmation != "fallback_free_and_disable"
@@ -683,6 +959,9 @@ async fn handle(
                 workspace_choices: vec![],
                 force_workspace_id: None,
                 free_fallback: true,
+                kind: "reauth".into(),
+                automatic: false,
+                logs: vec![diagnostics::lifecycle("任务已排队")],
             });
         }
         "api/cancel" => {
@@ -774,6 +1053,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detailed_history_stays_within_management_response_budget() {
+        let mut queue = Queue::default();
+        for i in 0..200 {
+            let mut job = Job::queued(format!("request-{i}"), format!("account-{i}"), false);
+            for _ in 0..160 {
+                job.log(&"阶段响应特征".repeat(10));
+            }
+            assert!(job.logs.len() <= 100);
+            job.finish("failed", "保留最新结果");
+            assert_eq!(job.logs.last().unwrap().message, "保留最新结果");
+            queue.jobs.push(job);
+        }
+        trim_log_history(&mut queue);
+        assert!(serde_json::to_vec(&queue).unwrap().len() <= 256 * 1024);
+        assert!(!queue.jobs.last().unwrap().logs.is_empty());
+        assert!(queue.jobs.first().unwrap().logs.is_empty());
+        assert!(
+            serde_json::to_vec(&json!({"jobs":queue.jobs}))
+                .unwrap()
+                .len()
+                < 512 * 1024
+        );
+    }
+
+    #[test]
+    fn legacy_queue_remains_enabled_and_saved_switch_is_preserved() {
+        let legacy: Queue = serde_json::from_value(json!({"jobs":[]})).unwrap();
+        assert!(legacy.enabled);
+        let disabled: Queue = serde_json::from_value(json!({"jobs":[],"enabled":false})).unwrap();
+        assert!(!disabled.enabled);
+        assert!(
+            !serde_json::from_value::<Queue>(serde_json::to_value(disabled).unwrap())
+                .unwrap()
+                .enabled
+        );
+    }
 
     #[test]
     fn all_oauth_plans_are_eligible_but_other_credentials_are_not() {

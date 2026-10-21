@@ -36,10 +36,12 @@ pub async fn load(host: &HostClient) -> Result<(crate::Queue, Option<u64>), Plug
     let data: StateGetResult =
         serde_json::from_value(reply.result).map_err(|_| fault("任务状态读取失败"))?;
     match data.record {
-        Some(record) => Ok((
-            serde_json::from_value(record.value).map_err(|_| fault("任务状态格式无效"))?,
-            Some(record.version),
-        )),
+        Some(record) => {
+            let mut queue =
+                serde_json::from_value(record.value).map_err(|_| fault("任务状态格式无效"))?;
+            crate::trim_log_history(&mut queue);
+            Ok((queue, Some(record.version)))
+        }
         None => Ok((crate::Queue::default(), None)),
     }
 }
@@ -48,7 +50,9 @@ pub async fn save(
     queue: &crate::Queue,
     version: Option<u64>,
 ) -> Result<(), PluginFault> {
-    let reply = host.call("host.state.put", json!({"namespace":"reauth-manager","key":"queue","value":queue,"expected_version":version}), vec![]).await.map_err(|e| e.into_plugin_fault())?;
+    let mut saved = queue.clone();
+    crate::trim_log_history(&mut saved);
+    let reply = host.call("host.state.put", json!({"namespace":"reauth-manager","key":"queue","value":saved,"expected_version":version}), vec![]).await.map_err(|e| e.into_plugin_fault())?;
     let _: StatePutResult =
         serde_json::from_value(reply.result).map_err(|_| fault("任务保存失败"))?;
     Ok(())

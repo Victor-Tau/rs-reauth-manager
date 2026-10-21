@@ -22,8 +22,11 @@ free.groups = []
 const revisions = new Map(accounts.map(a => [a.id, 1]))
 const records = new Map(), handles = new Map(), starts = [], completes = []
 const disables = [], saves = [], credentials = new Map()
-const proxies = [{ id: 'proxy_default', endpoint: 'http://127.0.0.1:21001', enabled: true, revision: 1 }]
+const proxies = [{ name: 'Fixture Proxy', hasAuthentication: true, id: 'proxy_default', endpoint: 'http://127.0.0.1:21001', enabled: true, revision: 1 }]
 const accountProxies = new Map()
+const importFlows = new Map(), importTransports = new Map(), importUpdates = []
+let importCompleteFailure = false, importUpdateFailure = false
+const groups = [{ id: 'g1', name: 'Team' }, { id: 'g2', name: 'Shared Group' }]
 let proxyPageSize = 200, memberPageSize = 200, invalidProxyPage = false
 function pageOf(items, requested, size) {
   return { items: items.slice((requested - 1) * size, requested * size), page: { page: requested, totalPages: Math.ceil(items.length / size) } }
@@ -82,6 +85,7 @@ async function callback(meta, payload) {
     assert.equal(data.expected_version, old?.version ?? null)
     const version = (old?.version || 0) + 1
     const serialized = JSON.stringify(data.value)
+    assert.ok(Buffer.byteLength(serialized) <= 262144, 'Private state exceeds the manifest value limit')
     for (const secret of ['fixture-password', 'fixture:pass', 'secret-code', 'refreshToken', 'authorizationUrl', 'callbackUrl', 'fallback-private-rt', 'access_token', 'id_token', 'refresh_token', 'fixture-cookie']) assert.ok(!serialized.includes(secret), `Persistent state leaked ${secret}`)
     records.set(data.key, { value: structuredClone(data.value), version, schema_version: 1 })
     return result(meta.id, { version })
@@ -96,23 +100,44 @@ async function callback(meta, payload) {
     }
     else if (url.pathname === '/api/admin/proxies/accounts') {
       assert.equal(meta.params.method, 'GET'); assert.equal(url.searchParams.get('pageSize'), '200')
-      const members = accounts.filter(a => (accountProxies.get(a.id) ?? 'proxy_default') === url.searchParams.get('proxyId') && (a.email.includes(url.searchParams.get('search')) || a.name.includes(url.searchParams.get('search'))))
+      const members = accounts.filter(a => (accountProxies.get(a.id) ?? 'proxy_default') === url.searchParams.get('proxyId') && (a.email.includes(url.searchParams.get('search') || '') || a.name.includes(url.searchParams.get('search') || '')))
       dataReply = pageOf(members, Number(url.searchParams.get('page')), memberPageSize)
     }
+    else if (url.pathname === '/api/admin/account-groups/options') dataReply = pageOf(groups, Number(url.searchParams.get('page')), 200)
     else if (url.pathname === '/api/admin/accounts') { assert.equal(meta.params.method, 'GET'); dataReply = { items: accounts } }
-    else if (url.pathname === '/api/admin/accounts/detail') { assert.equal(meta.params.method, 'GET'); dataReply = { account: accounts.find(a => a.id === url.searchParams.get('accountId')), credentialConfiguration: { transport: 'http' } } }
+    else if (url.pathname === '/api/admin/accounts/detail') { assert.equal(meta.params.method, 'GET'); dataReply = { account: accounts.find(a => a.id === url.searchParams.get('accountId')), credentialConfiguration: { transport: importTransports.get(url.searchParams.get('accountId')) || 'http' } } }
     else if (url.pathname === '/api/admin/accounts/export') {
       assert.equal(meta.params.method, 'GET'); assert.equal(url.searchParams.get('confirm'), 'export_sensitive_accounts')
       const id = url.searchParams.get('accountIds'); assert.ok(!id.includes(','))
       dataReply = { documents: [{ provider: 'openai', document: { accounts: [{ id, outboundProxyUrl: 'http://fixture:pass@127.0.0.1:21001', refreshToken: 'old-secret-rt' }] } }] }
     }
-    else if (url.pathname === '/api/admin/accounts/oauth/start') { assert.equal(meta.params.method, 'POST'); assert.deepEqual(Object.keys(data).sort(), ['accountId', 'name', 'provider']); starts.push(structuredClone(data)); dataReply = { flowId: `flow_${data.accountId}`, authorizationUrl: nativeAuthorization }; status = 201 }
+    else if (url.pathname === '/api/admin/accounts/oauth/start') {
+      assert.equal(meta.params.method, 'POST'); starts.push(structuredClone(data)); status = 201
+      if ('accountId' in data) { assert.deepEqual(Object.keys(data).sort(), ['accountId', 'name', 'provider']); dataReply = { flowId: `flow_${data.accountId}`, authorizationUrl: nativeAuthorization } }
+      else { assert.deepEqual(Object.keys(data).sort(), ['name', 'outboundProxyId', 'provider']); const flowId = `import_flow_${importFlows.size}`; importFlows.set(flowId, data); dataReply = { flowId, authorizationUrl: nativeAuthorization } }
+    }
     else if (url.pathname === '/api/admin/accounts/batch-update') {
       assert.equal(meta.params.method, 'POST'); assert.deepEqual(Object.keys(data).sort(), ['accountIds', 'enabled']); assert.equal(data.accountIds.length, 1); assert.equal(data.enabled, false)
       const a = accounts.find(a => a.id === data.accountIds[0]); assert.equal(a.capacity.usedSlots, 0)
       disables.push(a.id); dataReply = {}
       if (a.id === 'fb_disable_failure') { status = 502; code = 50201 }
       else { a.enabled = false; if (a.id === 'fb_disable_race') revisions.set(a.id, revisions.get(a.id) + 1); if (a.id === 'fb_inflight_race') a.capacity.usedSlots = 1 }
+    }
+    else if (url.pathname === '/api/admin/accounts/update') {
+      importUpdates.push(structuredClone(data)); const a = accounts.find(a => a.id === data.accountId); assert.ok(a)
+      if (importUpdateFailure) { status = 502; code = 50201; dataReply = null }
+      else { for (const k of ['notes', 'enabled', 'concurrencyLimit', 'weight', 'modelAccess']) a[k] = structuredClone(data[k]); a.groups = groups.filter(g => data.groupIds.includes(g.id)); importTransports.set(a.id, data.connection.transport); dataReply = {} }
+    }
+    else if (url.pathname === '/api/admin/accounts/oauth/complete' && importFlows.has(data.flowId)) {
+      assert.equal(data.provider, 'openai'); assert.equal(data.settings.enabled, false); completes.push(structuredClone(data))
+      if (importCompleteFailure) { status = 502; code = 50201; dataReply = null }
+      else {
+        const flow = importFlows.get(data.flowId), id = `acct_import_${importFlows.size}`, a = make(id)
+        a.email = flow.name; a.name = flow.name; a.enabled = false; a.status = 'normal'; a.planType = 'free'
+        a.notes = data.settings.notes; a.weight = data.settings.weight; a.concurrencyLimit = data.settings.concurrencyLimit; a.modelAccess = structuredClone(data.settings.modelAccess); a.groups = groups.filter(g => data.settings.groupIds.includes(g.id))
+        a.outboundProxyEndpoint = flow.outboundProxyId ? 'http://127.0.0.1:21001' : null
+        accounts.push(a); revisions.set(id, 1); accountProxies.set(id, flow.outboundProxyId); dataReply = { accountId: id }; status = 201
+      }
     }
     else if (url.pathname === '/api/admin/accounts/oauth/complete') {
       assert.equal(meta.params.method, 'POST'); assert.deepEqual(Object.keys(data).sort(), ['callbackUrl', 'flowId', 'provider']); completes.push(structuredClone(data)); const a = accounts.find(a => `flow_${a.id}` === data.flowId)
@@ -171,7 +196,7 @@ let passed = 0
 const check = name => { passed++; console.log(`PASS ${name}`) }
 try {
   await start()
-  const reg = JSON.parse((await call('management.register', {}, Buffer.alloc(0), 'registration')).payload.toString()); assert.equal(reg.resources.length, 3); assert.equal(reg.routes.length, 8); assert.ok(!reg.resources.some(r => r.path.includes('runtime'))); check('Only UI resources are exposed, protocol runtime stays private')
+  const reg = JSON.parse((await call('management.register', {}, Buffer.alloc(0), 'registration')).payload.toString()); assert.equal(reg.resources.length, 3); assert.equal(reg.routes.length, 12); assert.ok(reg.routes.some(r => r.method === 'POST' && r.path === 'api/logout')); assert.ok(!reg.resources.some(r => r.path.includes('runtime'))); check('Only UI resources are exposed, protocol runtime stays private')
   const largeContext = { method: 'GET', uri: '/plugin/api/jobs', http_version: 'HTTP/1.1', headers: [{ name: 'x-fixture', value: Buffer.alloc(70000, 'x').toString('base64') }], peer_addr: null, client_ip: null }
   const contextual = await call('management.handle', { method: 'GET', path: 'api/jobs', query: '', content_type: null, headers: [] }, Buffer.alloc(0), 'management', largeContext)
   assert.equal(contextual.result.status, 200); assert.ok(!contextual.payload.includes('fixture-private-context')); check('RPC v4 carries large request context separately from metadata and business JSON')
@@ -283,9 +308,147 @@ try {
     const before = structuredClone(a), saved = saves.length, completed = completes.length
     await submit([id]); const done = await finish(id)
     assert.equal(done.status, 'failed'); assert.match(done.message, expected)
+    assert.ok(done.logs.length > 1 && done.logs.length <= 100)
+    assert.ok(done.logs.some(entry => entry.message.includes('HTTP 200') && entry.message.includes('授权确认')))
+    assert.ok(done.logs.every(entry => Number.isSafeInteger(entry.at) && typeof entry.message === 'string'))
     for (const secret of ['fixture-password', 'fallback-private-rt', 'private-host']) assert.ok(!done.message.includes(secret))
+    for (const secret of ['fixture-password', 'fallback-private-rt', 'private-host']) assert.ok(!JSON.stringify(done.logs).includes(secret))
     assert.equal(saves.length, saved); assert.equal(completes.length, completed); assert.deepEqual(a, before)
     check(`${id}: specific diagnostics survive SDK transport without credential leakage or account changes`)
   }
+  await submit(['slow', 'good']); await tick()
+  assert.equal(job('slow').status, 'running'); assert.equal(job('good').status, 'queued')
+  const startedBeforeClose = starts.length, completedBeforeClose = completes.length
+  assert.equal((await request('config', { enabled: 'false' })).status, 400)
+  assert.equal((await request('config', { enabled: false, extra: true })).status, 400)
+  assert.equal((await request('config', { enabled: false })).value.enabled, false)
+  assert.equal(job('slow').status, 'cancelled'); assert.equal(job('good').status, 'cancelled')
+  assert.equal((await request('jobs')).value.enabled, false)
+  for (const [route, body] of [['submit', { accountIds: ['good'], requestId: randomUUID() }], ['force-submit', {}], ['free-fallback', {}]]) {
+    const response = await request(route, body); assert.equal(response.status, 400); assert.match(response.value.error.message, /插件已关闭/)
+  }
+  await tick(); await call('plugin.reconcile', {}, Buffer.alloc(0), 'maintenance')
+  assert.equal(starts.length, startedBeforeClose); assert.equal(completes.length, completedBeforeClose)
+  check('Closing cancels running and queued jobs, blocks all submission modes and maintenance writeback')
+  await stop(); await start(); assert.equal((await request('jobs')).value.enabled, false)
+  await tick(); assert.equal(starts.length, startedBeforeClose)
+  assert.equal((await request('config', { enabled: true })).value.enabled, true)
+  await tick(); assert.equal(starts.length, startedBeforeClose)
+  await submit(['good']); assert.equal((await finish('good')).status, 'success')
+  check('Switch survives plugin restart and reopening only allows explicitly submitted new jobs')
+
+  const importPayload = (label, overrides = {}) => ({ requestId: randomUUID(), email: `${label}@example.com`, name: `${label}@example.com`, password: 'fixture-password', totpSecret: 'GEZDGNBVGY3TQOJQ', workspaceId: '', transport: 'prefer_websocket', outboundProxyId: 'proxy_default', loginProxyUrl: '', saveLoginNotes: false, settings: { notes: 'Imported account', enabled: true, concurrencyLimit: 12, weight: 42, modelAccess: { mode: 'allowlist', models: ['gpt-5', 'gpt-5-mini'] }, groupIds: ['g1', 'g2'] }, ...overrides })
+  async function finishImport(requestId) {
+    for (let i = 0; i < 100; i++) { await tick(); const j = records.get('queue').value.jobs.find(j => j.requestId === `${requestId}:import`); if (!['queued', 'running'].includes(j.status)) return j; await new Promise(r => setTimeout(r, 20)) }
+    throw new Error('Import did not finish')
+  }
+  const optionReply = await request('options'); assert.equal(optionReply.status, 200); assert.deepEqual(optionReply.value.groups, groups); assert.ok(!JSON.stringify(optionReply.value).includes('fixture:pass'))
+  const payload = importPayload('import-success'), startsBeforeImport = starts.length
+  assert.equal((await request('import', payload)).status, 200)
+  assert.equal((await request('import', payload)).status, 200); assert.equal(starts.length, startsBeforeImport + 1)
+  assert.equal((await request('import', importPayload('import-concurrent'))).status, 400)
+  const imported = await finishImport(payload.requestId); assert.equal(imported.status, 'success')
+  const created = accounts.find(a => a.id === imported.accountId)
+  assert.equal(created.email, payload.email); assert.equal(created.enabled, true); assert.equal(importTransports.get(created.id), 'prefer_websocket')
+  for (const k of ['notes', 'weight', 'concurrencyLimit', 'modelAccess']) assert.deepEqual(created[k], payload.settings[k])
+  assert.deepEqual(created.groups, groups); assert.equal(importUpdates.at(-2).enabled, false); assert.equal(importUpdates.at(-1).enabled, true)
+  assert.equal((await request('import', importPayload('import-success'))).status, 400)
+  check('Import uses native OAuth, reuses authenticated proxy, verifies all official settings and deduplicates request/email')
+  const direct = importPayload('import-direct', { outboundProxyId: '', settings: { ...payload.settings, enabled: false, notes: '', modelAccess: { mode: 'all', models: [] } } })
+  assert.equal((await request('import', direct)).status, 200); const directDone = await finishImport(direct.requestId); assert.equal(directDone.status, 'success'); assert.equal(accounts.find(a => a.id === directDone.accountId).enabled, false)
+  check('Direct import and disabled scheduling preserve empty notes and unrestricted models')
+  for (const invalid of [{ settings: { ...payload.settings, weight: 101 } }, { settings: { ...payload.settings, concurrencyLimit: 0 } }, { settings: { ...payload.settings, modelAccess: { mode: 'allowlist', models: [] } } }, { outboundProxyId: 'unknown' }, { loginProxyUrl: 'http://wrong.example:21001' }]) {
+    const old = starts.length; assert.equal((await request('import', importPayload('import-invalid', invalid))).status, 400); assert.equal(starts.length, old)
+  }
+  check('Invalid scheduling, models, missing proxy and mismatched login proxy stop before OAuth')
+  importUpdateFailure = true
+  const partial = importPayload('import-partial'); assert.equal((await request('import', partial)).status, 200)
+  const partialDone = await finishImport(partial.requestId); assert.equal(partialDone.status, 'review'); assert.ok(partialDone.accountId); assert.equal(accounts.find(a => a.id === partialDone.accountId).enabled, false)
+  const previousImportCompletes = completes.length; await tick(); await tick(); assert.equal(completes.length, previousImportCompletes); importUpdateFailure = false
+  check('Partial import retains created account ID, leaves scheduling disabled and never replays completion')
+  importCompleteFailure = true
+  const uncertainImport = importPayload('import-uncertain'); assert.equal((await request('import', uncertainImport)).status, 200)
+  assert.equal((await finishImport(uncertainImport.requestId)).status, 'review'); const cImport = completes.length; await tick(); assert.equal(completes.length, cImport); importCompleteFailure = false
+  check('Uncertain OAuth creation remains review without automatic retries')
+  const changedImport = importPayload('import-proxy-change'); assert.equal((await request('import', changedImport)).status, 200)
+  const proxyForImport = proxies.find(p => p.id === 'proxy_default'); proxyForImport.revision++
+  const beforeChangedImport = completes.length; assert.equal((await finishImport(changedImport.requestId)).status, 'review'); assert.equal(completes.length, beforeChangedImport)
+  check('Changing selected proxy during import stops before account creation')
+  const autoConfig = { enabled: true, intervalMinutes: 1, cooldownHours: 24, allGroups: false, groupIds: ['g2'], includeUngrouped: false, statuses: ['error'], allPlans: false, plans: ['free'], enabledOnly: true }
+  const autoAccount = make('automatic-selected'); autoAccount.groups = [groups[1]]; autoAccount.planType = ' Free '; accounts.push(autoAccount); revisions.set(autoAccount.id, 1)
+  const skipped = make('automatic-wrong-plan'); skipped.groups = [groups[1]]; accounts.push(skipped); revisions.set(skipped.id, 1)
+  assert.equal((await request('config', { enabled: true, automation: { ...autoConfig, statuses: [] } })).status, 400)
+  assert.equal((await request('config', { enabled: true, automation: autoConfig })).status, 200)
+  const startAuto = starts.length; await call('plugin.reconcile', {}, Buffer.alloc(0), 'maintenance')
+  assert.equal(starts.length, startAuto + 1); assert.equal(starts.at(-1).accountId, autoAccount.id)
+  assert.equal(job(autoAccount.id).automatic, true); assert.equal((await finish(autoAccount.id)).status, 'success')
+  // Reset only the scan clock and status to exercise cooldown without wall-clock sleeps.
+  autoAccount.status = 'error'; records.get('queue').value.last_scan_at = 0
+  await tick(); assert.equal(starts.length, startAuto + 1)
+  await stop(); await start(); assert.equal((await request('jobs')).value.automation.enabled, true)
+  records.get('queue').value.last_scan_at = 0; await tick(); assert.equal(starts.length, startAuto + 1)
+  delete records.get('queue').value.auto_attempts[autoAccount.id]; records.get('queue').value.last_scan_at = 0
+  failComplete = true; await tick(); assert.equal((await finish(autoAccount.id)).status, 'review'); failComplete = false
+  const blockedStarts = starts.length; records.get('queue').value.last_scan_at = 0; await tick(); assert.equal(starts.length, blockedStarts)
+  check('Uncertain automatic completion blocks future scans even when the scan clock advances')
+  await submit([autoAccount.id]); assert.equal((await finish(autoAccount.id)).status, 'success')
+  autoAccount.status = 'error'; delete records.get('queue').value.auto_attempts[autoAccount.id]; records.get('queue').value.last_scan_at = 0
+  const afterManual = starts.length; await tick(); assert.equal(starts.length, afterManual + 1); assert.equal((await finish(autoAccount.id)).status, 'success')
+  check('Successful manual verification clears the automatic block despite an older review record')
+  assert.equal((await request('config', { enabled: true, automation: { ...autoConfig, enabled: false } })).status, 200)
+  check('Maintenance scans intersect group/status/plan, persist configuration/cooldown and avoid duplicate authorization after restart')
+
+  const logoutStartCount = starts.length, logoutCompleteCount = completes.length, logoutSaveCount = saves.length
+  for (const id of ['logout_good', 'logout_rejected', 'logout_uncertain', 'logout_changed', 'logout_slow', 'logout_next', 'logout_no_token', 'logout_busy']) {
+    const a = make(id); a.notes = ''; accounts.push(a); revisions.set(id, 1)
+  }
+  const logoutRequest = (ids, requestId = randomUUID(), confirmation = 'logout_all_and_disable') => request('logout', { accountIds: ids, requestId, confirmation })
+  assert.equal((await logoutRequest(['logout_good'], randomUUID(), '')).status, 400)
+  assert.equal((await logoutRequest(['logout_good', 'logout_good'])).status, 400)
+  await request('config', { enabled: false }); assert.equal((await logoutRequest(['logout_good'])).status, 400); await request('config', { enabled: true })
+  check('Logout requires explicit confirmation, valid selections and an enabled plugin')
+  const logoutBefore = structuredClone(accounts.find(a => a.id === 'logout_good'))
+  const logoutKey = randomUUID()
+  assert.equal((await logoutRequest(['logout_good'], logoutKey)).status, 200)
+  assert.equal((await logoutRequest(['logout_good'], logoutKey)).status, 200)
+  assert.equal(records.get('queue').value.jobs.filter(j => j.requestId === `${logoutKey}:logout_good`).length, 1)
+  assert.equal((await submit(['logout_good'], logoutKey)).status, 400)
+  assert.equal((await submit(['logout_good'])).status, 400)
+  assert.equal((await finish('logout_good')).step, 'logged_out')
+  const loggedOut = accounts.find(a => a.id === 'logout_good'); assert.equal(loggedOut.enabled, false)
+  for (const key of ['notes', 'groups', 'weight', 'concurrencyLimit', 'name', 'accountId', 'outboundProxyEndpoint']) assert.deepEqual(loggedOut[key], logoutBefore[key])
+  assert.equal(starts.length, logoutStartCount); assert.equal(completes.length, logoutCompleteCount); assert.equal(saves.length, logoutSaveCount)
+  assert.equal(records.get('queue').value.auto_attempts.logout_good, 9007199254740991)
+  check('Logout uses stored credentials without notes or OAuth login, disables scheduling, preserves settings and deduplicates requests across action types')
+  for (const [id, expected] of [['logout_rejected', 'failed'], ['logout_uncertain', 'review']]) {
+    await logoutRequest([id]); const done = await finish(id); assert.equal(done.status, expected); assert.equal(accounts.find(a => a.id === id).enabled, false)
+    assert.ok(!JSON.stringify(done).includes('old-access')); assert.ok(!JSON.stringify(done).includes('fixture-cookie'))
+  }
+  check('Rejected and uncertain logout responses keep scheduling disabled and never persist upstream secrets')
+  await logoutRequest(['logout_changed']); await tick(); accounts.find(a => a.id === 'logout_changed').enabled = true
+  assert.equal((await finish('logout_changed')).status, 'review')
+  check('Concurrent account changes after logout are reported for review without overwriting the new settings')
+  const noToken = accounts.find(a => a.id === 'logout_no_token'), busyLogout = accounts.find(a => a.id === 'logout_busy')
+  const withoutToken = credential(noToken); delete withoutToken.facts.material.access_token; credentials.set(noToken.id, withoutToken)
+  busyLogout.capacity.usedSlots = 1
+  const disabledBeforeGuard = disables.length
+  for (const a of [noToken, busyLogout]) { await logoutRequest([a.id]); assert.equal((await finish(a.id)).status, 'review'); assert.equal(a.enabled, true) }
+  assert.equal(disables.length, disabledBeforeGuard)
+  check('Missing access token and active account stop before scheduling changes and logout')
+  await logoutRequest(['logout_slow', 'logout_next']); await tick()
+  assert.equal(job('logout_slow').status, 'running')
+  const nextBefore = accounts.find(a => a.id === 'logout_next').enabled
+  await request('cancel', { requestId: null }); await tick()
+  assert.equal(job('logout_slow').status, 'cancelled'); assert.equal(job('logout_next').status, 'cancelled'); assert.equal(accounts.find(a => a.id === 'logout_next').enabled, nextBefore)
+  check('Stopping logout kills the running worker and prevents subsequent queued accounts from being changed')
+  loggedOut.groups = [{ id: 'logout-only', name: 'Logout only' }]
+  const logoutAutoConfig = { ...autoConfig, allGroups: false, groupIds: ['logout-only'], includeUngrouped: false, allPlans: true, plans: [], enabledOnly: false }
+  await request('config', { enabled: true, automation: logoutAutoConfig })
+  const beforeLogoutAuto = starts.length; records.get('queue').value.last_scan_at = 0; await tick()
+  assert.equal(job('logout_good').kind, 'logout'); assert.equal(starts.length, beforeLogoutAuto)
+  await request('config', { enabled: true, automation: { ...logoutAutoConfig, enabled: false } })
+  await stop(); await start(); assert.equal(records.get('queue').value.auto_attempts.logout_good, 9007199254740991)
+  check('Logout intent blocks automatic relogin, including disabled-account scans and plugin restart')
+
   await stop(); assert.equal(errors, ''); console.log(`Verified ${passed} protocol scenarios`)
 } catch (error) { child?.kill(); console.error(error); process.exitCode = 1 }

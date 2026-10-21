@@ -66,6 +66,57 @@ class ProtocolTests(unittest.TestCase):
         with patch.dict(sys.modules, {"vendor.lib.chatgpt_client": self.chat, "vendor.lib.oauth_client": self.oauth}), patch.object(runner, "emit", side_effect=lambda event, **kw: self.messages.append({"event": event, **kw})):
             runner.run(self.data)
 
+    def test_import_selects_unique_workspace_without_existing_account(self):
+        self.data.update(mode="import", accountId="")
+        OAuth.cookie = {"workspaces": [{"id": "new-workspace"}]}
+        self.run_login()
+        self.assertEqual(self.messages[-1]["event"], "complete")
+
+    def test_import_personal_callback_does_not_require_workspace_metadata(self):
+        self.data.update(mode="import", accountId="")
+        for cookie in [None, {}, {"workspaces": []}]:
+            with self.subTest(cookie=cookie):
+                OAuth.cookie = cookie
+                self.run_login()
+                self.assertEqual(self.messages[-1]["event"], "complete")
+
+    def test_import_personal_callback_still_requires_matching_state(self):
+        self.data.update(mode="import", accountId="")
+        OAuth.cookie = {}
+        OAuth.result["state"] = "wrong"
+        with self.assertRaisesRegex(ValueError, "^state$"):
+            self.run_login()
+
+    def test_import_conflicting_session_workspace_ids_require_selection(self):
+        self.data.update(mode="import", accountId="")
+        OAuth.cookie = {"workspace_id": "first-workspace", "workspaces": [{"id": "second-workspace"}]}
+        self.run_login()
+        self.assertEqual(self.messages[-1]["code"], "workspace")
+
+    def test_import_multiple_workspaces_require_explicit_selection(self):
+        self.data.update(mode="import", accountId="")
+        OAuth.cookie = {"workspace_id": "first-workspace", "workspaces": [{"id": "first-workspace"}, {"id": "second-workspace"}]}
+        self.run_login()
+        self.assertEqual(self.messages[-1]["code"], "workspace")
+        self.assertFalse(any(m["event"] == "complete" for m in self.messages))
+
+    def test_import_explicit_workspace_must_match_session(self):
+        self.data.update(mode="import", accountId="target-workspace")
+        OAuth.cookie = {"workspace_id": "other-workspace", "workspaces": [{"id": "other-workspace"}]}
+        self.run_login()
+        self.assertEqual(self.messages[-1]["code"], "workspace")
+
+    def test_import_direct_connection_is_explicit_and_reauth_still_requires_proxy(self):
+        self.data.update(mode="import", accountId="", proxy="")
+        with patch.object(Chat, "__init__", return_value=None) as chat_init:
+            with self.assertRaises(AttributeError):
+                self.run_login()
+            self.assertEqual(chat_init.call_args.kwargs["proxy"], None)
+        self.data.pop("mode")
+        with patch.object(Chat, "__init__", side_effect=AssertionError("No session allowed")):
+            with self.assertRaisesRegex(ValueError, "proxy"):
+                self.run_login()
+
     def test_notes_exact_format_and_email(self):
         self.assertEqual(runner.parse_notes(self.data["notes"], EMAIL)[0], EMAIL)
         for notes in [self.data["notes"].replace(EMAIL, "other@example.com"), self.data["notes"] + "----extra", "missing", self.data["notes"] + "\nnew"]:

@@ -1,5 +1,86 @@
 //! 将协议诊断白名单投影为可公开的中文错误，不透传上游正文
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogEntry {
+    pub at: u64,
+    pub message: String,
+}
+
+pub fn lifecycle(message: &str) -> LogEntry {
+    LogEntry {
+        at: crate::host::now(),
+        message: message.into(),
+    }
+}
+
+pub fn trace(entry: &Value) -> Option<LogEntry> {
+    let action = match entry["action"].as_str()? {
+        "request" => "发起请求",
+        "response" => "收到响应",
+        "transport" => "传输失败",
+        "workspace_candidates" => "提取工作区候选",
+        "callback_result" => "提取并校验授权回调",
+        _ => return None,
+    };
+    let stage = message(
+        &serde_json::json!({"diagnostic":{"stage":entry["stage"]}}),
+        "登录协议",
+    );
+    let mut parts = vec![format!(
+        "{} · {action}",
+        stage.split('：').next().unwrap_or("登录协议")
+    )];
+    if let Some(method @ ("GET" | "POST")) = entry["method"].as_str() {
+        parts.push(method.into());
+    }
+    for (key, label, limit) in [
+        ("httpStatus", "HTTP", 599),
+        ("elapsedMs", "耗时 ms", 600000),
+        ("responseBytes", "响应字节", 16000000),
+        ("count", "候选数", 10000),
+    ] {
+        if let Some(value) = entry[key].as_u64().filter(|v| *v <= limit) {
+            parts.push(format!("{label} {value}"));
+        }
+    }
+    for (key, label) in [
+        ("found", "找到"),
+        ("redirect", "重定向"),
+        ("callbackFound", "回调"),
+        ("continueFound", "继续地址"),
+        ("stateMatched", "state 匹配"),
+    ] {
+        if let Some(value) = entry[key].as_bool() {
+            parts.push(format!("{label} {}", if value { "是" } else { "否" }));
+        }
+    }
+    if let Some(
+        page @ ("log-in" | "mfa-challenge" | "workspace" | "organization" | "consent" | "http-page"
+        | "email-verification" | "add-phone" | "choose-an-account" | "edge-challenge"),
+    ) = entry["pageType"].as_str()
+    {
+        parts.push(format!("页面 {page}"));
+    }
+    if let Some(kind @ ("text/html" | "application/json" | "text/plain")) =
+        entry["contentType"].as_str()
+    {
+        parts.push(format!("类型 {kind}"));
+    }
+    if let Some(source @ ("session" | "page")) = entry["source"].as_str() {
+        parts.push(format!("来源 {source}"));
+    }
+    if let Some(
+        reason @ ("request_timeout" | "dns_failed" | "tls_failed" | "connection_failed"
+        | "transport_failed"),
+    ) = entry["reason"].as_str()
+    {
+        parts.push(reason.into());
+    }
+    Some(lifecycle(&parts.join(" · ")))
+}
 
 pub fn message(output: &Value, fallback: &str) -> String {
     let Some(diagnostic) = output.get("diagnostic").filter(|d| d.is_object()) else {
@@ -21,6 +102,7 @@ pub fn message(output: &Value, fallback: &str) -> String {
         "callback" => "校验授权回调",
         "token_exchange" => "交换授权令牌",
         "identity" => "校验授权身份",
+        "logout" => "退出所有登录",
         _ => "登录协议",
     };
     let reason = match diagnostic["reason"].as_str().unwrap_or_default() {
@@ -95,5 +177,18 @@ mod tests {
         assert!(
             !message(&json!({"diagnostic":{"httpStatus":999999}}), "fallback").contains("HTTP")
         );
+    }
+
+    #[test]
+    fn detailed_logs_project_only_public_features() {
+        let entry = trace(&json!({"action":"response","stage":"consent","method":"POST","httpStatus":200,"elapsedMs":123,"pageType":"consent","contentType":"text/html","redirect":false,"responseBytes":420,"raw":"private-secret","url":"private-callback","cookie":"private-cookie"})).unwrap();
+        assert!(entry.message.contains("授权确认"));
+        assert!(entry.message.contains("HTTP 200"));
+        assert!(entry.message.contains("耗时 ms 123"));
+        assert!(!entry.message.contains("private-"));
+        let entry = trace(&json!({"action":"response","stage":"private-secret","method":"private-secret","httpStatus":90000,"pageType":"private-secret","contentType":"private-secret","count":-1})).unwrap();
+        assert!(!entry.message.contains("private-"));
+        assert!(!entry.message.contains("90000"));
+        assert!(trace(&json!({"action":"private-secret"})).is_none());
     }
 }

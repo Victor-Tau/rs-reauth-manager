@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { webcrypto } from 'node:crypto'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
 const require = createRequire(path.join(root, 'frontend/package.json'))
@@ -12,14 +13,28 @@ const account = (id, overrides = {}) => ({ id, name: `${id}@example.com`, email:
 let accounts = [account('error'), account('missing', { notesValid: false, proxy: null }), account('paused', { enabled: false }), account('healthy', { status: 'normal' }), account('expired-access', { status: 'normal', accessTokenExpiresAt: '2020-01-01T00:00:00Z' }), account('quota', { status: 'quota_exhausted' }), account('limited', { status: 'rate_limited' })]
 const job = (id, status, batch = 'history') => ({ accountId: id, requestId: `${batch}:${id}`, status, step: status, message: status === 'failed' ? 'fixture failure' : '', startedAt: 1, finishedAt: ['queued', 'running'].includes(status) ? null : 2 })
 let jobs = [job('healthy', 'success'), job('error', 'failed'), job('error', 'failed', 'older')]
-let outcomes = {}, throwAfterSubmit = false, throwAfterForce = false, calls = [], latestBatch = null, checks = 0, mounted
+let throwAfterLogout = false
+let outcomes = {}, throwAfterSubmit = false, throwAfterForce = false, calls = [], latestBatch = null, checks = 0, mounted, enabled = true, failConfig = false
 const clone = value => structuredClone(value)
 const reply = body => ({ status: 200, contentType: 'application/json', body: new TextEncoder().encode(JSON.stringify(body)).buffer })
 globalThis.window = { codexProxyPlugin: { version: 2, theme: 'light', request: async input => {
   calls.push(clone(input))
   if (input.path === 'api/accounts') return reply({ accounts })
-  if (input.path === 'api/jobs') return reply({ jobs })
+  if (input.path === 'api/jobs') return reply({ jobs, enabled })
   const body = input.body ? JSON.parse(input.body) : {}
+  if (input.path === 'api/config') {
+    if (failConfig) throw new Error('fixture config failed')
+    enabled = body.enabled
+    if (!enabled) for (const entry of jobs) if (['queued', 'running'].includes(entry.status)) { entry.status = entry.step = 'cancelled'; entry.finishedAt = 4 }
+    return reply({ enabled })
+  }
+  if (input.path === 'api/logout') {
+    assert.equal(body.confirmation, 'logout_all_and_disable')
+    latestBatch = body.requestId
+    jobs.push(...body.accountIds.map(id => ({ ...job(id, 'queued', latestBatch), kind: 'logout' })))
+    if (throwAfterLogout) throw new Error('fixture logout response lost')
+    return reply({ jobs })
+  }
   if (input.path === 'api/submit') {
     latestBatch = body.requestId
     jobs.push(...body.accountIds.map(id => job(id, 'queued', latestBatch)))
@@ -39,6 +54,7 @@ globalThis.window = { codexProxyPlugin: { version: 2, theme: 'light', request: a
       const freeFallback = outcomes[entry.accountId] === 'free'
       entry.status = freeFallback ? 'success' : outcomes[entry.accountId] || 'success'; entry.step = freeFallback ? 'free' : entry.status
       entry.message = entry.status === 'failed' ? 'fixture current failure' : ''; entry.finishedAt = 3
+      if (entry.kind === 'logout') { entry.step = 'logged_out'; accounts.find(a => a.id === entry.accountId).enabled = false }
       if (entry.status === 'success') accounts.find(a => a.id === entry.accountId).status = 'normal'
       if (freeFallback) { const a = accounts.find(a => a.id === entry.accountId); a.enabled = false; a.planType = 'free'; entry.message = '原工作区已失效，已切回 Free，已停止调度' }
     }
@@ -61,6 +77,8 @@ const renderer = createRenderer({
 })
 const flush = async () => { for (let i = 0; i < 5; i++) { await nextTick(); await new Promise(resolve => setImmediate(resolve)) } }
 const check = name => { checks++; console.log(`PASS ${name}`) }
+const originalCrypto = Object.getOwnPropertyDescriptor(globalThis, 'crypto')
+Object.defineProperty(globalThis, 'crypto', { configurable: true, value: { getRandomValues: webcrypto.getRandomValues.bind(webcrypto) } })
 try {
   const { useReauthManager } = await server.ssrLoadModule('/src/useReauthManager.ts')
   async function mount() {
@@ -78,7 +96,19 @@ try {
   state.filter.value = 'all'; state.search.value = 'Shared Group'
   assert.deepEqual(state.filtered.value.map(a => a.id), ['error']); state.search.value = ''
   check('Group search matches any RS membership without excluding ungrouped accounts')
+  state.selected.value = ['error']; state.group.value = 'group:g2'; await flush()
+  assert.deepEqual(state.filtered.value.map(a => a.id), ['error']); assert.equal(state.selected.value.length, 0)
+  state.group.value = 'ungrouped'; await flush(); assert.ok(state.filtered.value.every(a => !a.groups.length))
+  assert.equal(state.groupOptions.value.find(g => g.value === 'group:g2').label, 'Shared Group（1）')
+  state.plan.value = 'team'; assert.equal(state.filtered.value.length, 0); state.plan.value = 'all'
+  state.showResults('error'); await flush(); assert.equal(state.group.value, 'all')
+  state.filter.value = 'all'
+  check('Exact group selection supports multi-membership and ungrouped accounts, clears stale selections and combines with other filters')
+
   state.confirm([accounts[0], accounts[3]]); outcomes = { error: 'success', healthy: 'failed' }; await state.submit()
+  assert.match(JSON.parse(calls.find(c => c.path === 'api/submit').body).requestId, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+  assert.equal(state.showConfirm.value, false); assert.equal(state.busy.value, false)
+  check('Confirmation submits a valid UUID and closes in HTTP contexts without crypto.randomUUID')
   assert.equal(state.success.value, 1); assert.equal(state.failed.value, 1); assert.equal(state.eligibleCount.value, 2)
   check('Only the submitted batch contributes outcomes and successful account recovery reduces the error count')
   state.plan.value = 'team'; state.search.value = 'not-found'; state.page.value = 4
@@ -138,5 +168,40 @@ try {
   assert.equal(calls.filter(c => c.path === 'api/force-submit').length, 2)
   assert.equal(state.active.value, 1)
   check('Lost forced submission response is read back without automatically replaying authorization')
+  await state.setEnabled(false)
+  assert.equal(state.enabled.value, false); assert.equal(state.active.value, 0); assert.equal(state.showForce.value, false)
+  const submissions = calls.filter(c => /submit|free-fallback/.test(c.path)).length
+  state.confirm([target]); await state.submit(); await state.submitForce()
+  state.freeSource.value = job('error', 'failed'); state.freeConfirmed.value = true; await state.submitFreeFallback()
+  assert.equal(calls.filter(c => /submit|free-fallback/.test(c.path)).length, submissions)
+  assert.match(state.error.value, /插件已关闭/)
+  mounted.unmount(); state = await mount(); assert.equal(state.enabled.value, false)
+  check('Closing stops the live queue, blocks every submission mode, and survives reopening the page')
+  failConfig = true; await state.setEnabled(true); assert.equal(state.enabled.value, false); assert.match(state.error.value, /config failed/)
+  failConfig = false; await state.setEnabled(true); assert.equal(state.enabled.value, true)
+  check('Failed settings writes preserve the server state and reopening requires a successful save')
+  jobs = []; await state.load(); const logoutTarget = { ...accounts[0], notesValid: false }; accounts[0] = logoutTarget; await state.load()
+  assert.equal(state.ready(logoutTarget), false); assert.equal(state.logoutReady(logoutTarget), true)
+  let logoutCalls = calls.filter(c => c.path === 'api/logout').length
+  state.confirmLogout([logoutTarget]); state.showLogout.value = false
+  assert.equal(calls.filter(c => c.path === 'api/logout').length, logoutCalls)
+  state.confirmLogout([logoutTarget]); outcomes = {}; await state.submitLogout()
+  assert.equal(calls.filter(c => c.path === 'api/logout').length, logoutCalls + 1)
+  assert.equal(state.showLogout.value, false); assert.equal(state.success.value, 1); assert.equal(accounts[0].enabled, false)
+  check('Logout is separate from reauthorization, needs no password notes and only submits after confirmation')
+  throwAfterLogout = true; state.confirmLogout([logoutTarget]); await state.submitLogout()
+  assert.equal(state.showLogout.value, false); assert.equal(state.active.value, 1); assert.match(state.error.value, /勿直接重复提交/)
+  assert.equal(calls.filter(c => c.path === 'api/logout').length, logoutCalls + 2)
+  throwAfterLogout = false
+  await state.setEnabled(false); state.confirmLogout([logoutTarget]); await state.submitLogout()
+  assert.equal(calls.filter(c => c.path === 'api/logout').length, logoutCalls + 2)
+  await state.setEnabled(true)
+  check('Lost logout response is reconciled without replay, and a disabled plugin blocks logout')
+  Object.defineProperty(globalThis, 'crypto', { configurable: true, value: undefined })
+  state.confirm([target]); const callsBefore = calls.filter(c => c.path === 'api/submit').length
+  await state.submit(); assert.match(state.error.value, /浏览器无法生成任务标识/)
+  assert.equal(state.showConfirm.value, true); assert.equal(state.busy.value, false)
+  assert.equal(calls.filter(c => c.path === 'api/submit').length, callsBefore)
+  check('Missing browser randomness displays an actionable error without leaving confirmation stuck')
   console.log(`Verified ${checks} batch scenarios`)
-} finally { mounted?.unmount(); delete globalThis.window; await server.close() }
+} finally { mounted?.unmount(); delete globalThis.window; if (originalCrypto) Object.defineProperty(globalThis, 'crypto', originalCrypto); else delete globalThis.crypto; await server.close() }

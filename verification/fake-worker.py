@@ -9,12 +9,28 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "protocol"))
 from runner import authorization
 
 data = json.load(sys.stdin)
-assert data["proxy"] == "http://fixture:pass@127.0.0.1:21001"
+if data.get("mode") == "logout":
+    assert data["proxy"] == "http://fixture:pass@127.0.0.1:21001"
+    assert data["accessToken"] == "old-access"
+    assert data["accountId"] == "original-workspace"
+    assert "notes" not in data and "authorizationUrl" not in data
+    if data["email"].startswith("logout_slow"):
+        time.sleep(60)
+    if data["email"].startswith("logout_rejected"):
+        print(json.dumps({"event": "error", "code": "logout_rejected", "httpStatus": 401, "rawResponse": "old-access fixture-cookie"}), flush=True)
+    elif data["email"].startswith("logout_uncertain"):
+        print(json.dumps({"event": "error", "code": "logout_uncertain", "httpStatus": 502, "rawResponse": "old-access fixture-cookie"}), flush=True)
+    else:
+        print(json.dumps({"event": "logout_complete"}), flush=True)
+    sys.exit(0)
+assert data["proxy"] == "http://fixture:pass@127.0.0.1:21001" or data.get("mode") == "import" and data["proxy"] == ""
 assert "----" in data["notes"]
 assert data["email"] in data["notes"]
 assert data["authorizationUrl"].startswith("https://chatgpt.com/codex/desktop-auth?")
 assert authorization(data["authorizationUrl"])[1] == "fixture"
 print(json.dumps({"event": "step", "step": "login"}), flush=True)
+for _ in range(160 if data['email'].startswith('diagnostic_unsafe') else 1):
+    print(json.dumps({'event':'diagnostic', 'entry':{'action':'response','stage':'consent','method':'GET','httpStatus':200,'elapsedMs':123,'pageType':'consent','rawResponse':'fixture-password fallback-private-rt','url':'private-host'}}), flush=True)
 if data["email"].startswith("slow"):
     time.sleep(60)
 elif data["email"].startswith("failed"):

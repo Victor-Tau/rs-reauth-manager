@@ -12,6 +12,7 @@ import threading
 import time
 from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 from diagnostics import describe_failure, stage_for_url, transport_reason
+from consent import workspace_ids
 
 
 def emit(event, **fields):
@@ -69,19 +70,20 @@ def error_code(result):
 
 
 def workspace_ids_from_text(text, original):
-    values = []
-    for value in re.findall(r'(?i)(?:workspace_id|workspaceId)[^A-Za-z0-9_-]{0,8}([A-Za-z0-9_-]{8,128})', str(text)):
-        if value != original and value not in values:
-            values.append(value)
-    return values
+    return [value for value in workspace_ids(text) if value != original]
 
 
 def run(data):
+    if data.get("mode") == "logout":
+        from logout import run_logout
+        run_logout(data, emit)
+        return
     email, password, secret = parse_notes(data["notes"], data["email"])
     authorize_url, state, redirect = authorization(data["authorizationUrl"])
     proxy = str(data["proxy"])
+    importing = data.get("mode") == "import"
     parsed_proxy = urlsplit(proxy)
-    if parsed_proxy.scheme not in {"http", "https", "socks5", "socks5h"} or not parsed_proxy.hostname:
+    if not (importing and not proxy) and (parsed_proxy.scheme not in {"http", "https", "socks5", "socks5h"} or not parsed_proxy.hostname):
         raise ValueError("proxy")
     from vendor.lib.chatgpt_client import ChatGPTClient
     from vendor.lib.oauth_client import OAuthClient
@@ -102,14 +104,26 @@ def run(data):
         last_attempt = None
         failed_authorization = None
 
+        def trace(self, action, **fields):
+            emit('diagnostic', entry={'action': action, **fields})
+
         def _oauth_request(self, method, url, **kwargs):
             self.last_attempt = {'stage': stage_for_url(url), 'httpStatus': None}
+            stage = self.last_attempt['stage']
+            started = time.monotonic()
+            self.trace('request', stage=stage, method=method)
             try:
                 response = super()._oauth_request(method, url, **kwargs)
             except Exception as exc:
                 self.last_attempt['transport'] = transport_reason(exc)
+                self.trace('transport', stage=stage, reason=self.last_attempt['transport'])
                 raise
             self.last_attempt['httpStatus'] = getattr(response, 'status_code', None)
+            text = str(getattr(response, 'text', '') or '')
+            final_url = str(getattr(response, 'url', '') or url)
+            page = self._infer_external_page_type(final_url, text)
+            content_type = str(getattr(response, 'headers', {}).get('Content-Type', '')).split(';')[0].lower()
+            self.trace('response', stage=stage, method=method, httpStatus=self.last_attempt['httpStatus'], elapsedMs=int((time.monotonic() - started) * 1000), pageType=page, contentType=content_type, responseBytes=len(text.encode('utf-8')), redirect=bool(getattr(response, 'headers', {}).get('Location')))
             return response
 
         def _exchange_code_for_tokens(self, *args, **kwargs):
@@ -130,26 +144,31 @@ def run(data):
             return value
 
         def _extract_workspace_id_from_session(self):
-            value = super()._extract_workspace_id_from_session()
-            return self._remember_workspace(value)
-
-        def _extract_workspace_id_from_session(self):
             selected = self.selected_workspace
+            session = self._decode_oauth_session_cookie() or {}
+            workspaces = session.get("workspaces") or []
+            ids = set()
+            if isinstance(session.get("workspace_id"), str) and session["workspace_id"]:
+                ids.add(self._remember_workspace(session["workspace_id"]))
+            if isinstance(workspaces, list):
+                for item in workspaces:
+                    if isinstance(item, dict) and isinstance(item.get("id"), str) and item["id"]:
+                        ids.add(self._remember_workspace(item["id"]))
+            self.trace('workspace_candidates', stage='workspace', source='session', count=len(ids))
             if not selected:
+                if importing:
+                    if len(ids) == 1:
+                        self.selected_workspace = next(iter(ids))
+                        return self.selected_workspace
+                    if not ids:
+                        return ""
+                    raise ValueError("workspace")
                 if self.unbound_workspace:
                     return ""
                 raise ValueError("workspace")
-            session = self._decode_oauth_session_cookie() or {}
-            workspaces = session.get("workspaces") or []
-            if isinstance(session.get("workspace_id"), str):
-                self._remember_workspace(session.get("workspace_id"))
-            if isinstance(workspaces, list):
-                for item in workspaces:
-                    if isinstance(item, dict):
-                        self._remember_workspace(item.get("id"))
-            if session.get("workspace_id") == selected or any(isinstance(w, dict) and w.get("id") == selected for w in workspaces):
+            if selected in ids:
                 return selected
-            if selected == target:
+            if selected == target and not importing:
                 try:
                     personal = personal_candidate(session, target)
                 except ValueError:
@@ -159,10 +178,18 @@ def run(data):
 
         def _extract_workspace_id_from_html(self, html_text):
             text = str(html_text)
-            for value in workspace_ids_from_text(text, target):
+            ids = workspace_ids(text)
+            self.trace('workspace_candidates', stage='workspace', source='page', count=len(ids))
+            for value in ids:
                 self._remember_workspace(value)
             if self.selected_workspace and self.selected_workspace in text:
                 return self._remember_workspace(self.selected_workspace)
+            if importing and not self.selected_workspace:
+                if len(ids) == 1:
+                    self.selected_workspace = ids[0]
+                    return ids[0]
+                if not ids:
+                    return ""
             if self.unbound_workspace:
                 return ""
             raise ValueError("workspace")
@@ -174,6 +201,11 @@ def run(data):
             return result
 
         def workspace_matches(self):
+            if importing and not self.selected_workspace:
+                self._extract_workspace_id_from_session()
+                # Personal accounts can return a valid OAuth callback without workspace metadata
+                if not self.selected_workspace:
+                    return not self.workspace_candidates
             session = self._decode_oauth_session_cookie() or {}
             ids = [w.get("id") for w in session.get("workspaces", []) if isinstance(w, dict)]
             selected = self.selected_workspace
@@ -185,9 +217,9 @@ def run(data):
             return super().get_mfa_code(*args, **kwargs)
 
     emit("step", step="session")
-    chat = ChatGPTClient(proxy=proxy, verbose=False, impersonate="chrome133a")
+    chat = ChatGPTClient(proxy=proxy or None, verbose=False, impersonate="chrome133a")
     chat.current_email = email
-    oauth = BoundOAuthClient({"oauth_phone_strategy": "sms", "sub2api_oauth_max_hops": 20, "oauth_email_otp_max_attempts": 1, "oauth_email_otp_timeout": 30, "sub2api_oauth_impersonates": "chrome133a", "sub2api_redirect_uri": urlunsplit(redirect)}, proxy=proxy, verbose=False)
+    oauth = BoundOAuthClient({"oauth_phone_strategy": "sms", "sub2api_oauth_max_hops": 20, "oauth_email_otp_max_attempts": 1, "oauth_email_otp_timeout": 30, "sub2api_oauth_impersonates": "chrome133a", "sub2api_redirect_uri": urlunsplit(redirect)}, proxy=proxy or None, verbose=False)
     oauth.session.close()
     oauth.session = chat.session
     try:
@@ -196,6 +228,7 @@ def run(data):
             oauth.last_attempt = None
             oauth.failed_authorization = None
             result = oauth.authorize_external_oauth_url(url, chat, expected_state=expected, user_agent=chat.ua, impersonate=chat.impersonate, email=email, password=password, mfa_client=ProgressMfa(secret), max_hops=20)
+            oauth.trace('callback_result', stage='callback', found=isinstance(result, dict) and result.get('ok') is True, stateMatched=isinstance(result, dict) and result.get('state') == expected)
             if not isinstance(result, dict) or result.get('ok') is not True:
                 oauth.failed_authorization = describe_failure(result, attempt=oauth.last_attempt)
             return result
@@ -219,6 +252,8 @@ def run(data):
             try:
                 result = authorize(authorize_url, state)
             except WorkspaceUnavailable as unavailable:
+                if importing:
+                    raise ValueError("workspace") from None
                 fallback(unavailable.personal_id)
                 return
             if not isinstance(result, dict) or not result.get("ok"):
@@ -227,6 +262,8 @@ def run(data):
             if result.get("state") != state or not result.get("code"):
                 raise ValueError("state")
             if not oauth.workspace_matches():
+                if importing:
+                    raise ValueError("workspace")
                 fallback(personal_candidate(oauth._decode_oauth_session_cookie(), target))
                 return
             callback = urlunsplit((redirect.scheme, redirect.netloc, redirect.path, urlencode({"state": state, "code": result["code"]}), ""))
@@ -260,7 +297,10 @@ def main():
         os._exit(0)
     threading.Thread(target=watchdog, daemon=True).start()
     try:
-        data = json.loads(sys.stdin.read(16385))
+        raw = sys.stdin.read(65537)
+        if len(raw) > 65536:
+            raise ValueError("credentials")
+        data = json.loads(raw)
         # Vendored diagnostics must never share the structured protocol pipe.
         with open(os.devnull, "w") as sink, contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
             run(data)
