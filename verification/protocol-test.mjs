@@ -158,14 +158,14 @@ function parse() {
     const meta = JSON.parse(buffer.subarray(12, 12 + m).toString())
     const contextBytes = meta.request_context_bytes ?? 0, dataBytes = meta.data_bytes ?? 0
     assert.ok(contextBytes + dataBytes <= p)
-    assert.ok(!('params' in meta) && !('result' in meta), 'RPC v4 business JSON must be outside control metadata')
+    assert.ok(!('params' in meta) && !('result' in meta), 'RPC v5 business JSON must be outside control metadata')
     const dataStart = 12 + m + contextBytes
     if (meta.type === 'callback' || meta.type === 'result') {
-      assert.ok(dataBytes > 0, 'RPC v4 callbacks/results require a business JSON segment')
+      assert.ok(dataBytes > 0, 'RPC v5 callbacks/results require a business JSON segment')
       meta[meta.type === 'result' ? 'result' : 'params'] = JSON.parse(buffer.subarray(dataStart, dataStart + dataBytes).toString())
     }
     const payload = buffer.subarray(dataStart + dataBytes, total); buffer = buffer.subarray(total)
-    if (meta.type === 'ready') { assert.equal(meta.protocol_version, 4); ready.resolve() }
+    if (meta.type === 'ready') { assert.equal(meta.protocol_version, 5); ready.resolve() }
     else if (meta.type === 'callback') callback(meta, payload).catch(e => { ready.reject(e); for (const w of pending.values()) w.reject(e) })
     else { const w = pending.get(meta.id); if (w) { pending.delete(meta.id); if (meta.type === 'result') w.resolve({ result: meta.result, payload }); else w.reject(new Error(JSON.stringify(meta.error))) } }
   }
@@ -176,7 +176,7 @@ async function start() {
   child.stdout.on('data', data => { buffer = Buffer.concat([buffer, data]); parse() }); child.stderr.on('data', data => errors += data)
   child.on('error', e => ready.reject(e))
   child.on('exit', code => { if (code) { const e = new Error(`Plugin exit ${code}: ${errors}`); ready.reject(e); for (const w of pending.values()) w.reject(e) } })
-  send({ type: 'hello', handshake: { protocol_version: 4, artifact_sha256: 'a'.repeat(64), plugin_id: 'personal.reauth-manager', instance_id: 'test_instance', generation: 1, incarnation: 'fixture', configuration: {}, contributes: { management: { id: 'personal.reauth-manager.management', version: 2, stages: ['management'] }, maintenance: { id: 'personal.reauth-manager.maintenance', version: 1, stages: ['maintenance'] } } } })
+  send({ type: 'hello', handshake: { protocol_version: 5, artifact_sha256: 'a'.repeat(64), plugin_id: 'personal.reauth-manager', instance_id: 'test_instance', generation: 1, incarnation: 'fixture', configuration: {}, contributes: { management: { id: 'personal.reauth-manager.management', version: 2, stages: ['management'] }, maintenance: { id: 'personal.reauth-manager.maintenance', version: 1, stages: ['maintenance'] } } } })
   await ready.promise
 }
 async function stop() { const exited = new Promise(resolve => child.once('exit', resolve)); send({ type: 'shutdown' }); child.stdin.end(); await exited }
@@ -199,8 +199,8 @@ try {
   const reg = JSON.parse((await call('management.register', {}, Buffer.alloc(0), 'registration')).payload.toString()); assert.equal(reg.resources.length, 3); assert.equal(reg.routes.length, 12); assert.ok(reg.routes.some(r => r.method === 'POST' && r.path === 'api/logout')); assert.ok(!reg.resources.some(r => r.path.includes('runtime'))); check('Only UI resources are exposed, protocol runtime stays private')
   const largeContext = { method: 'GET', uri: '/plugin/api/jobs', http_version: 'HTTP/1.1', headers: [{ name: 'x-fixture', value: Buffer.alloc(70000, 'x').toString('base64') }], peer_addr: null, client_ip: null }
   const contextual = await call('management.handle', { method: 'GET', path: 'api/jobs', query: '', content_type: null, headers: [] }, Buffer.alloc(0), 'management', largeContext)
-  assert.equal(contextual.result.status, 200); assert.ok(!contextual.payload.includes('fixture-private-context')); check('RPC v4 carries large request context separately from metadata and business JSON')
-  await call('plugin.reconcile', {}, Buffer.alloc(0), 'maintenance'); check('Maintenance v1 runs without an entry request context under RPC v4')
+  assert.equal(contextual.result.status, 200); assert.ok(!contextual.payload.includes('fixture-private-context')); check('RPC v5 carries large request context separately from metadata and business JSON')
+  await call('plugin.reconcile', {}, Buffer.alloc(0), 'maintenance'); check('Maintenance v1 runs without an entry request context under RPC v5')
   const beforeProbe = records.get('queue')?.value.jobs.length ?? 0; assert.deepEqual((await request('runtime-check', {})).value, { ready: true }); assert.equal(starts.length, 0); assert.equal(completes.length, 0); assert.equal(records.get('queue')?.value.jobs.length ?? 0, beforeProbe); check('Runtime preflight never queues an account or starts native authorization')
   const listing = await request('accounts'); assert.equal(listing.status, 200); assert.equal(listing.value.accounts.length, 11); assert.ok(listing.value.accounts.some(a => a.id === 'free')); assert.ok(!listing.value.accounts.some(a => ['api_key', 'other_provider'].includes(a.id))); for (const a of listing.value.accounts) { assert.ok(!('notes' in a)); assert.ok(!('refreshToken' in a)); assert.ok(!JSON.stringify(a).includes('fixture-password')) } check('All OpenAI OAuth plans including Free are listed without leaking credentials')
   assert.equal(listing.value.accounts.find(a => a.id === 'bad_notes').notesValid, false); check('Notes must match original account email')
