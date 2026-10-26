@@ -158,14 +158,14 @@ function parse() {
     const meta = JSON.parse(buffer.subarray(12, 12 + m).toString())
     const contextBytes = meta.request_context_bytes ?? 0, dataBytes = meta.data_bytes ?? 0
     assert.ok(contextBytes + dataBytes <= p)
-    assert.ok(!('params' in meta) && !('result' in meta), 'RPC v5 business JSON must be outside control metadata')
+    assert.ok(!('params' in meta) && !('result' in meta), 'RPC v6 business JSON must be outside control metadata')
     const dataStart = 12 + m + contextBytes
     if (meta.type === 'callback' || meta.type === 'result') {
-      assert.ok(dataBytes > 0, 'RPC v5 callbacks/results require a business JSON segment')
+      assert.ok(dataBytes > 0, 'RPC v6 callbacks/results require a business JSON segment')
       meta[meta.type === 'result' ? 'result' : 'params'] = JSON.parse(buffer.subarray(dataStart, dataStart + dataBytes).toString())
     }
     const payload = buffer.subarray(dataStart + dataBytes, total); buffer = buffer.subarray(total)
-    if (meta.type === 'ready') { assert.equal(meta.protocol_version, 5); ready.resolve() }
+    if (meta.type === 'ready') { assert.equal(meta.protocol_version, 6); assert.deepEqual(meta.call_budgets, {}); ready.resolve() }
     else if (meta.type === 'callback') callback(meta, payload).catch(e => { ready.reject(e); for (const w of pending.values()) w.reject(e) })
     else { const w = pending.get(meta.id); if (w) { pending.delete(meta.id); if (meta.type === 'result') w.resolve({ result: meta.result, payload }); else w.reject(new Error(JSON.stringify(meta.error))) } }
   }
@@ -176,14 +176,14 @@ async function start() {
   child.stdout.on('data', data => { buffer = Buffer.concat([buffer, data]); parse() }); child.stderr.on('data', data => errors += data)
   child.on('error', e => ready.reject(e))
   child.on('exit', code => { if (code) { const e = new Error(`Plugin exit ${code}: ${errors}`); ready.reject(e); for (const w of pending.values()) w.reject(e) } })
-  send({ type: 'hello', handshake: { protocol_version: 5, artifact_sha256: 'a'.repeat(64), plugin_id: 'personal.reauth-manager', instance_id: 'test_instance', generation: 1, incarnation: 'fixture', configuration: {}, contributes: { management: { id: 'personal.reauth-manager.management', version: 2, stages: ['management'] }, maintenance: { id: 'personal.reauth-manager.maintenance', version: 1, stages: ['maintenance'] } } } })
+  send({ type: 'hello', handshake: { protocol_version: 6, artifact_sha256: 'a'.repeat(64), plugin_id: 'personal.reauth-manager', instance_id: 'test_instance', generation: 1, incarnation: 'fixture', configuration: {}, contributes: { management: { id: 'personal.reauth-manager.management', version: 2, stages: ['management'] }, maintenance: { id: 'personal.reauth-manager.maintenance', version: 1, stages: ['maintenance'] } } } })
   await ready.promise
 }
 async function stop() { const exited = new Promise(resolve => child.once('exit', resolve)); send({ type: 'shutdown' }); child.stdin.end(); await exited }
 async function call(method, params = {}, payload = Buffer.alloc(0), stage = 'management', entry) {
   const id = sequence += 2, w = Promise.withResolvers(); pending.set(id, w)
   const request = entry ?? (stage === 'management' ? { method: params.method, uri: `/plugin/${params.path}`, http_version: 'HTTP/1.1', headers: [{ name: 'authorization', value: Buffer.from('fixture-private-context').toString('base64') }], peer_addr: '127.0.0.1:12345', client_ip: '127.0.0.1' } : undefined)
-  send({ type: 'call', id, method, params, context: { call_id: id, instance_id: 'test_instance', generation: 1, incarnation: 'fixture', stage, timeout_ms: 60000, resource_stream: false, resource_scope_id: `scope_${id}`, ...(request ? { request } : {}) } }, payload)
+  send({ type: 'call', id, method, params, context: { call_id: id, instance_id: 'test_instance', generation: 1, incarnation: 'fixture', stage, timeout_ms: stage === 'registration' ? 5000 : 120000, resource_stream: false, resource_scope_id: `scope_${id}`, ...(request ? { request } : {}) } }, payload)
   return Promise.race([w.promise, new Promise((_, reject) => setTimeout(() => reject(new Error(`Timeout ${method}`)), 10000).unref())])
 }
 async function request(path, data) { const r = await call('management.handle', { method: data === undefined ? 'GET' : 'POST', path: `api/${path}`, query: '', content_type: data === undefined ? null : 'application/json', headers: [] }, data === undefined ? Buffer.alloc(0) : data); return { status: r.result.status, value: JSON.parse(r.payload.toString()) } }
@@ -196,11 +196,12 @@ let passed = 0
 const check = name => { passed++; console.log(`PASS ${name}`) }
 try {
   await start()
+  check('RPC v6 handshake uses SDK default stage budgets')
   const reg = JSON.parse((await call('management.register', {}, Buffer.alloc(0), 'registration')).payload.toString()); assert.equal(reg.resources.length, 3); assert.equal(reg.routes.length, 12); assert.ok(reg.routes.some(r => r.method === 'POST' && r.path === 'api/logout')); assert.ok(!reg.resources.some(r => r.path.includes('runtime'))); check('Only UI resources are exposed, protocol runtime stays private')
   const largeContext = { method: 'GET', uri: '/plugin/api/jobs', http_version: 'HTTP/1.1', headers: [{ name: 'x-fixture', value: Buffer.alloc(70000, 'x').toString('base64') }], peer_addr: null, client_ip: null }
   const contextual = await call('management.handle', { method: 'GET', path: 'api/jobs', query: '', content_type: null, headers: [] }, Buffer.alloc(0), 'management', largeContext)
-  assert.equal(contextual.result.status, 200); assert.ok(!contextual.payload.includes('fixture-private-context')); check('RPC v5 carries large request context separately from metadata and business JSON')
-  await call('plugin.reconcile', {}, Buffer.alloc(0), 'maintenance'); check('Maintenance v1 runs without an entry request context under RPC v5')
+  assert.equal(contextual.result.status, 200); assert.ok(!contextual.payload.includes('fixture-private-context')); check('RPC v6 carries large request context separately from metadata and business JSON')
+  await call('plugin.reconcile', {}, Buffer.alloc(0), 'maintenance'); check('Maintenance v1 runs without an entry request context with the RPC v6 120-second budget')
   const beforeProbe = records.get('queue')?.value.jobs.length ?? 0; assert.deepEqual((await request('runtime-check', {})).value, { ready: true }); assert.equal(starts.length, 0); assert.equal(completes.length, 0); assert.equal(records.get('queue')?.value.jobs.length ?? 0, beforeProbe); check('Runtime preflight never queues an account or starts native authorization')
   const listing = await request('accounts'); assert.equal(listing.status, 200); assert.equal(listing.value.accounts.length, 11); assert.ok(listing.value.accounts.some(a => a.id === 'free')); assert.ok(!listing.value.accounts.some(a => ['api_key', 'other_provider'].includes(a.id))); for (const a of listing.value.accounts) { assert.ok(!('notes' in a)); assert.ok(!('refreshToken' in a)); assert.ok(!JSON.stringify(a).includes('fixture-password')) } check('All OpenAI OAuth plans including Free are listed without leaking credentials')
   assert.equal(listing.value.accounts.find(a => a.id === 'bad_notes').notesValid, false); check('Notes must match original account email')
