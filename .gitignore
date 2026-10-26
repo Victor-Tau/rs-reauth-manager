@@ -30,3 +30,4 @@ verification/*
 !verification/test_consent.py
 
 !verification/release-smoke.mjs
+!verification/rpc-scheduler.mjs

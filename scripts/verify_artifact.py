@@ -18,7 +18,7 @@ with tarfile.open(path) as archive:
     manifest = json.load(archive.extractfile("plugin.json"))
     assert manifest["version"] == version, "Package version differs from source manifest"
     assert manifest["engines"] == source_manifest["engines"], "Package host range differs from source manifest"
-    assert manifest["package"]["protocolVersion"] == 6, "Package requires RPC v6"
+    assert manifest["package"]["protocolVersion"] == 7, "Package requires RPC v7"
     assert manifest["contributes"]["management"]["version"] == 2, "Package requires management v2"
     assert manifest["contributes"]["maintenance"]["version"] == 1, "Package requires maintenance v1"
     assert manifest["package"]["target"] == {"os": "linux", "architecture": "x86_64"}

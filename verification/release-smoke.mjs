@@ -3,12 +3,14 @@ import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { readFile, readdir, stat } from 'node:fs/promises'
 import { resolve, join } from 'node:path'
+import { createScheduler } from './rpc-scheduler.mjs'
 
 const root = resolve(process.argv[2])
 const manifest = JSON.parse(await readFile(join(root, 'plugin.json'), 'utf8'))
 const pending = new Map()
 const ready = Promise.withResolvers()
 const callbacks = []
+const scheduler = createScheduler(send)
 const child = spawn(join(root, manifest.main), [], { stdio: ['pipe', 'pipe', 'pipe'] })
 const exited = once(child, 'exit')
 let buffered = Buffer.alloc(0), stderr = '', sequence = 99, stopping = false
@@ -42,8 +44,9 @@ child.stdout.on('data', chunk => {
       const data = end > start ? JSON.parse(buffered.subarray(start, end)) : undefined
       const payload = buffered.subarray(end, length)
       buffered = buffered.subarray(length)
+      if (scheduler.handle(metadata)) continue
       if (metadata.type === 'ready') {
-        assert.equal(metadata.protocol_version, 6)
+        assert.equal(metadata.protocol_version, 7)
         assert.deepEqual(metadata.call_budgets, {})
         ready.resolve()
       } else if (metadata.type === 'callback') {
@@ -74,7 +77,7 @@ function call(method, params, payload = Buffer.alloc(0), stage = 'registration')
 }
 try {
   assert.deepEqual(await runtimeDirectories(), [])
-  send({ type: 'hello', handshake: { protocol_version: 6, artifact_sha256: process.argv[3], plugin_id: `${manifest.publisher}.${manifest.name}`, instance_id: 'release_smoke', generation: 1, incarnation: 'release_smoke', contributes: manifest.contributes } }, {})
+  send({ type: 'hello', handshake: { protocol_version: 7, artifact_sha256: process.argv[3], plugin_id: `${manifest.publisher}.${manifest.name}`, instance_id: 'release_smoke', generation: 1, incarnation: 'release_smoke', contributes: manifest.contributes } }, {})
   await ready.promise
   const registration = JSON.parse((await call('management.register', {})).payload)
   assert.equal(registration.resources.length, 3)
@@ -96,7 +99,7 @@ try {
   const [code] = await exited
   assert.equal(code, 0, stderr)
   assert.deepEqual(await runtimeDirectories(), [])
-  console.log(JSON.stringify({ version: manifest.version, protocolVersion: 6, runtimeReady: true, privateRuntimeMode: '0700', runtimeReused: true, shutdownCleanedRuntime: true, hostCallbacks: callbacks }, null, 2))
+  console.log(JSON.stringify({ version: manifest.version, protocolVersion: 7, runtimeReady: true, privateRuntimeMode: '0700', runtimeReused: true, shutdownCleanedRuntime: true, hostCallbacks: callbacks, scheduling: scheduler.verify() }, null, 2))
 } finally {
   clearTimeout(timeout)
   if (child.exitCode === null) child.kill()
