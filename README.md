@@ -2,7 +2,7 @@
 
 RS 网关独立插件，支持手动及按条件自动重新授权，也支持使用邮箱、密码与 2FA 密钥导入新账号。重新授权沿用原账号备注及绑定代理，成功后写回原账号
 
-**当前状态：实验性功能**，当前源码面向 RS v3.35.x，尚未完成该宿主版本的实际安装及真实账号完整登录与写回验证，请先在测试实例和自有测试账号上验证，不建议直接批量操作生产账号
+**当前状态：实验性功能**，当前源码面向 RS v3.36.x，尚未完成该宿主版本的实际安装及真实账号完整登录与写回验证，请先在测试实例和自有测试账号上验证，不建议直接批量操作生产账号
 
 ![模拟数据界面](docs/screenshots/overview-dark.png)
 
@@ -12,28 +12,28 @@ RS 网关独立插件，支持手动及按条件自动重新授权，也支持�
 
 在 [Releases](https://github.com/Victor-Tau/rs-reauth-manager/releases) 下载对应版本的 `.tar.gz` 与 `.sha256`，核对摘要后，在 RS 的插件管理中上传安装
 
-也可以使用 GitHub 来源安装，仓库填写 `Victor-Tau/rs-reauth-manager`，标签可填写 `v0.13.4` 或留空查询最新已公开发行版，选择插件 `.tar.gz` 附件，不是 GitHub 自动生成的 Source code 归档
+也可以使用 GitHub 来源安装，仓库填写 `Victor-Tau/rs-reauth-manager`，标签可填写 `v0.13.5` 或留空查询最新已公开发行版，选择插件 `.tar.gz` 附件，不是 GitHub 自动生成的 Source code 归档
 
 本仓库发布 Victor-Tau 维护的 0.13 系列，安装与升级请使用本仓库的 Releases，不要使用上游项目中的旧发行版。
 
 | 项目 | 范围 |
 | --- | --- |
 | 插件 ID | `personal.reauth-manager` |
-| 当前源码版本 | `0.13.4`，公开版本以 Releases 为准 |
-| 宿主兼容清单 | `>=3.35.0, <3.36.0` |
+| 当前源码版本 | `0.13.5`，公开版本以 Releases 为准 |
+| 宿主兼容清单 | `>=3.36.0, <3.37.0` |
 | 制品平台 | Linux x86_64，插件入口要求 glibc 2.28+ |
 | 账号范围 | 全部套餐的 ChatGPT OAuth 账号，包含 Free |
 | 功能入口 | 扩展页中的“账号重新授权” |
 
-插件进程使用 RPC v7、管理能力 v2 和维护能力 v1，浏览器宿主桥仍为 v2。RS 3.33.0 请使用 0.13.3，RS 3.32.0 的 RPC v6 宿主请使用 0.13.2，RS 3.29.7 的 RPC v5 宿主请使用 0.13.1，RPC v4 宿主请使用 0.13.0 或更早的发行包，不能仅修改清单复用同一二进制
+插件进程使用 RPC v7、管理能力 v2 和维护能力 v1，浏览器宿主桥仍为 v2。RS 3.35.x 请使用 0.13.4，RS 3.33.0 请使用 0.13.3，RS 3.32.0 的 RPC v6 宿主请使用 0.13.2，RS 3.29.7 的 RPC v5 宿主请使用 0.13.1，RPC v4 宿主请使用 0.13.0 或更早的发行包，不能仅修改清单复用同一二进制
 
 当上游没有返回任何候选工作区时，管理员可以选择“退回 Free”。该操作需要单独确认，会重新获取同一用户的 Free 授权，写回原账号并停止调度；不需要猜测或填写工作区 ID。
 
 暂不提供 ARM64、Windows 或 macOS 宿主安装包，前端可由桌面和手机浏览器访问
 
-## 0.13.4 适配 RS 3.35.x
+## CPR 版本与构建
 
-使用 RS 3.35.0 对应提交 `80f7d53085f5c9552e7e74b796a0bec50586ee1b` 的插件 SDK 和打包工具重新编译，宿主范围为 `>=3.35.0, <3.36.0`。已核对 3.35.1 未修改插件 SDK。RPC v7、管理能力 v2、维护能力 v1 与浏览器桥 v2 保持兼容，授权与写回保护逻辑保持不变。所有构建进程及子进程绑定单个 CPU 核心，Cargo 使用 `-j 1`。
+当前插件使用 CPR v3.36.0 对应提交 `5ae38dc0c55c192815ef605dde6c05fd767a2c28` 的公开 SDK 和 `cpr-plugin`，宿主范围为 `>=3.36.0, <3.37.0`。构建进程及子进程绑定单个 CPU 核心，Cargo 使用 `-j 1`。升级插件不会自动重新授权账号。
 
 ## 0.13.3 适配 RS 3.33.0 与 RPC v7
 
@@ -170,7 +170,7 @@ Free、Plus、Pro、Team、Business 等全部套餐的 OAuth 账号均可列出�
 适配层接受 RS 返回的官方桌面授权外层链接，仅拆出并校验 `authorize_url` 后交给上游协议；常规路径不重新生成或替换 RS 的 state、PKCE、client_id 和回调地址，也支持直接 OAuth 链接
 只有已验证的 Free 恢复路径使用上游 `generate_pkce` 生成独立的 state 和 PKCE，保留已校验的 client_id 与回调地址，复用同一代理及登录会话；绝不拿 RS 待完成流程的授权码搭配其他 verifier 交换
 
-后端使用 RS v3.35.0 的公开 SDK，固定提交 `80f7d53085f5c9552e7e74b796a0bec50586ee1b`；构建安装包时使用同一提交的 `cpr-plugin`，由 CLI 生成 RPC v7 安装清单
+后端使用 RS v3.36.0 的公开 SDK，固定提交 `5ae38dc0c55c192815ef605dde6c05fd767a2c28`；构建安装包时使用同一提交的 `cpr-plugin`，由 CLI 生成 RPC v7 安装清单
 界面使用官方 `@codex-proxy/ui` v0.7.0 编译发行包，并参考 [插件工作台示例](https://github.com/zyycn/codex-proxy-plugins) 组织公开宿主桥、请求层、业务解码和 composable
 不跨仓导入宿主内部源码，不读取管理 Cookie，也不直接访问宿主数据库
 
@@ -181,6 +181,17 @@ Free、Plus、Pro、Team、Business 等全部套餐的 OAuth 账号均可列出�
 需要 Rust 1.99.1、Node.js 24+、pnpm 9.12.2 和 Python 3.11+
 所有编译、依赖准备及打包均应在本机完成，不在生产应用服务器执行
 
+**资源限制（必须遵守）：整个构建与验证流程只能占用同一个 CPU 核心**，包括前端构建、Rust 编译、链接、SDK／CLI 构建、运行包生成、测试及打包。所有进程及子进程都须绑定该核心，步骤串行执行，不同时启动多个构建或测试任务。Cargo 固定使用 `-j 1`；仅设置 Cargo 任务数不足以限制链接器、前端工具及其他子进程的 CPU 使用。
+
+Linux 下先用 `taskset -pc $$` 查看可用核心，再进入绑定单个核心的工作 shell；以下假定 CPU 0 可用。该 shell 内启动的命令及子进程继承绑定，直到执行 `exit`，不要从其他终端并行启动任务。
+
+```bash
+taskset -c 0 bash
+export CARGO_BUILD_JOBS=1 RAYON_NUM_THREADS=1 UV_THREADPOOL_SIZE=1
+```
+
+后续开发、验证和发行命令均在上述 shell 内依次执行，SDK 与 `cpr-plugin` 的构建同样遵守此限制
+
 ```bash
 pnpm --dir frontend install --frozen-lockfile
 pnpm --dir frontend build
@@ -189,8 +200,9 @@ node verification/batch-test.mjs
 node verification/conventions.mjs
 # 安装 Playwright 后可选：node verification/ui-test.mjs
 cargo +1.99.1 fmt --manifest-path backend/Cargo.toml --check
-cargo +1.99.1 clippy --manifest-path backend/Cargo.toml --all-targets --locked -- -D warnings
-cargo +1.99.1 build --manifest-path backend/Cargo.toml --locked
+cargo +1.99.1 clippy -j 1 --manifest-path backend/Cargo.toml --all-targets --locked -- -D warnings
+cargo +1.99.1 test -j 1 --manifest-path backend/Cargo.toml --locked -- --test-threads=1
+cargo +1.99.1 build -j 1 --manifest-path backend/Cargo.toml --locked
 node verification/protocol-test.mjs
 python -B -m unittest discover -s verification -p 'test_*.py' -v
 ```
@@ -223,12 +235,12 @@ wheel 版本与 SHA-256 固定在 `protocol/requirements-linux.txt`，构建时�
 缓存默认位于仓库内 `.cache/runtime`，不会提交到 Git
 已有公开输入时可以用 `build_runtime.py --base-tar <file> --dependencies-dir <directory>` 指定其路径
 
-Linux 原生构建示例（将进程及子进程绑定到一个可用核心，以下假定 CPU 0 可用）
+Linux 原生构建示例（在上文绑定单个核心的 shell 内依次执行）
 
 ```bash
 taskset -c 0 cargo +1.99.1 build -j 1 --manifest-path backend/Cargo.toml --release --locked --target x86_64-unknown-linux-gnu
-cpr-plugin package --manifest plugin.json --binary backend/target/x86_64-unknown-linux-gnu/release/reauth-manager --target x86_64-unknown-linux-gnu --resource-map web=frontend/dist --output-dir dist
-python scripts/verify_artifact.py
+taskset -c 0 cpr-plugin package --manifest plugin.json --binary backend/target/x86_64-unknown-linux-gnu/release/reauth-manager --target x86_64-unknown-linux-gnu --resource-map web=frontend/dist --output-dir dist
+taskset -c 0 python scripts/verify_artifact.py
 ```
 
 Windows 交叉编译需先配置 Zig 与 cargo-zigbuild，将构建命令换成 `cargo +1.99.1 zigbuild -j 1 --manifest-path backend/Cargo.toml --release --locked --target x86_64-unknown-linux-gnu.2.28`
@@ -245,4 +257,4 @@ Python 离线测试覆盖协议适配、未修改的上游 OAuth 代码、独立
 前端测试覆盖宿主桥、业务响应解码、Vue 生命周期、本次任务统计和分组搜索，源码检查覆盖公开依赖、SFC、主题及资源约定
 制品校验检查 RPC 与能力版本、宿主范围、文件摘要及协议文件一致性，拒绝生产包中的测试入口和不受宿主支持的 HTML 资源引用
 
-这些测试使用模拟宿主和虚构账号，不访问真实上游，不能代替 RS v3.35.x 的实际安装及真实账号完整链路验收；代理、账号状态、工作区和人工验证仍可能导致实际登录失败
+这些测试使用模拟宿主和虚构账号，不访问真实上游，不能代替 RS v3.36.x 的实际安装及真实账号完整链路验收；代理、账号状态、工作区和人工验证仍可能导致实际登录失败
