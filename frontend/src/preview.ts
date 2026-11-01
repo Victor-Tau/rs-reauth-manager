@@ -1,10 +1,10 @@
-import { applyResolvedTheme, resolveTheme, DEFAULT_THEME_COLOR, DEFAULT_CUSTOM_THEME_COLOR } from '@codex-proxy/ui/theme'
+import { applyTheme, createTheme } from '@codex-proxy/ui/theme'
 import { defaultAutomation } from './types'
 import type { Account, Job } from './types'
 export function installPreview() {
   if (window.codexProxyPlugin) return
   const theme = new URLSearchParams(location.search).get('theme') === 'dark' ? 'dark' : 'light'
-  applyResolvedTheme(document.documentElement, resolveTheme(theme, DEFAULT_THEME_COLOR, DEFAULT_CUSTOM_THEME_COLOR))
+  applyTheme(document.documentElement, createTheme({ scheme: theme }))
   const accounts: Account[] = Array.from({ length: 61 }, (_, i) => ({ id: `acct_preview_${i}`, name: `team+account-${i + 1}@example.com+workspace3`, email: `account-${i + 1}@example.com`, enabled: i !== 4, planType: i % 6 ? 'team' : 'plus', status: i % 3 ? 'normal' : 'error', accessTokenExpiresAt: new Date(Date.now() + 86400000 * 6).toISOString(), proxy: i === 3 ? null : `http://127.0.0.1:${21001 + i}`, notesValid: i !== 7, groups: i % 5 === 0 ? [] : [{ id: 'preview-primary', name: '示例部署组' }, ...(i % 7 === 0 ? [{ id: 'preview-shared', name: '跨区域共享账号组' }] : [])] }))
   let jobs: Job[] = [{ requestId: 'preview-workspace:acct_preview_0', accountId: 'acct_preview_0', status: 'failed', step: 'workspace', message: '无法匹配原账号工作区，已停止写回', startedAt: Date.now() - 10000, finishedAt: Date.now(), workspaceChoices: [{ id: 'preview-other-team' }, { id: 'preview-personal-free' }] }]
   let enabled = true

@@ -6,7 +6,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 const root = fileURLToPath(new URL('..', import.meta.url))
 const require = createRequire(path.join(root, 'frontend/package.json'))
 const { createServer } = await import(pathToFileURL(require.resolve('vite')).href)
-const server = await createServer({ root: path.join(root, 'frontend'), configFile: false, server: { middlewareMode: true, hmr: false } })
+const server = await createServer({ root: path.join(root, 'frontend'), configFile: false, optimizeDeps: { noDiscovery: true, include: [] }, server: { middlewareMode: true, hmr: false, ws: false } })
 let handler, calls = [], count = 0
 globalThis.window = { codexProxyPlugin: { version: 2, theme: 'light', request: async input => { calls.push(input); return handler(input) } } }
 const json = (body, status = 200, contentType = 'application/json') => ({ status, contentType, body: new TextEncoder().encode(JSON.stringify(body)).buffer })

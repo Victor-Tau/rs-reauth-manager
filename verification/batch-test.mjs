@@ -8,7 +8,7 @@ const root = fileURLToPath(new URL('..', import.meta.url))
 const require = createRequire(path.join(root, 'frontend/package.json'))
 const { createServer } = await import(pathToFileURL(require.resolve('vite')).href)
 const { createRenderer, nextTick } = await import(pathToFileURL(require.resolve('vue')).href)
-const server = await createServer({ root: path.join(root, 'frontend'), configFile: false, server: { middlewareMode: true, hmr: false } })
+const server = await createServer({ root: path.join(root, 'frontend'), configFile: false, optimizeDeps: { noDiscovery: true, include: [] }, server: { middlewareMode: true, hmr: false, ws: false } })
 const account = (id, overrides = {}) => ({ id, name: `${id}@example.com`, email: `${id}@example.com`, enabled: true, planType: 'free', status: 'error', accessTokenExpiresAt: null, proxy: 'http://127.0.0.1:21001', notesValid: true, groups: id === 'error' ? [{ id: 'g1', name: 'Primary Group' }, { id: 'g2', name: 'Shared Group' }] : [], ...overrides })
 let accounts = [account('error'), account('missing', { notesValid: false, proxy: null }), account('paused', { enabled: false }), account('healthy', { status: 'normal' }), account('expired-access', { status: 'normal', accessTokenExpiresAt: '2020-01-01T00:00:00Z' }), account('quota', { status: 'quota_exhausted' }), account('limited', { status: 'rate_limited' })]
 const job = (id, status, batch = 'history') => ({ accountId: id, requestId: `${batch}:${id}`, status, step: status, message: status === 'failed' ? 'fixture failure' : '', startedAt: 1, finishedAt: ['queued', 'running'].includes(status) ? null : 2 })

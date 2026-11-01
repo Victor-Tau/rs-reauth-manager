@@ -1,7 +1,7 @@
 import { fileURLToPath } from 'node:url'
 const { chromium } = await import(process.env.RS_REAUTH_PLAYWRIGHT_MODULE || 'playwright')
 import assert from 'node:assert/strict'
-import { resolveTheme, DEFAULT_THEME_COLOR, DEFAULT_CUSTOM_THEME_COLOR } from '../frontend/node_modules/@codex-proxy/ui/dist/theme/index.js'
+import { createTheme, createThemeVars } from '../frontend/node_modules/@codex-proxy/ui/dist/theme/index.js'
 import { mkdir, readFile } from 'node:fs/promises'
 import { resolve, extname } from 'node:path'
 const root = fileURLToPath(new URL('..', import.meta.url))
@@ -51,7 +51,7 @@ try {
         else throw Error('Unexpected route')
         return { status: 200, contentType: 'application/json', body: new TextEncoder().encode(JSON.stringify(result)).buffer }
       } }
-    }, resolveTheme('light', DEFAULT_THEME_COLOR, DEFAULT_CUSTOM_THEME_COLOR).tokens)
+    }, { ...createThemeVars(createTheme({ scheme: 'light' }).tokens), '--z-font-family': 'system-ui, sans-serif', '--z-font-family-code': 'monospace' })
     await page.route('http://plugin.test/**', async route => {
       const url = new URL(route.request().url())
       if (url.pathname === '/host.html') return route.fulfill({ contentType: 'text/html', body: '<iframe src="/" sandbox="allow-scripts" style="width:100%;height:970px;border:0"></iframe>' })
@@ -62,6 +62,24 @@ try {
     const scope = page.frameLocator('iframe')
     const child = page.frames().find(f => f !== page.mainFrame())
     await scope.getByText('插件已开启', { exact: true }).waitFor()
+    for (const scheme of ['dark', 'light']) {
+      const colors = await child.evaluate(({ scheme, tokens }) => {
+        for (const [key, value] of Object.entries(tokens)) document.documentElement.style.setProperty(key, value)
+        window.codexProxyPlugin.theme = scheme
+        window.dispatchEvent(new Event('codex-proxy-themechange'))
+        const root = document.documentElement
+        const text = getComputedStyle(root).getPropertyValue('--z-color-text').trim()
+        const probe = document.createElement('span')
+        probe.style.color = text
+        document.body.append(probe)
+        const expected = getComputedStyle(probe).color
+        probe.remove()
+        return { theme: root.dataset.theme, text, expected, actual: getComputedStyle(root).color }
+      }, { scheme, tokens: createThemeVars(createTheme({ scheme }).tokens) })
+      assert.equal(colors.theme, scheme)
+      assert.ok(colors.text)
+      assert.equal(colors.actual, colors.expected, `Host ${scheme} theme must reach plugin styles`)
+    }
     const chooseGroup = async label => {
       await scope.getByRole('combobox', { name: '账号分组筛选', exact: true }).click()
       await scope.getByRole('option', { name: label, exact: true }).click()

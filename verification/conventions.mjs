@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { readdir, readFile, realpath } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
 const repos = [root, ...process.argv.slice(2).map(value => path.resolve(value))]
@@ -24,9 +24,9 @@ for (const repo of repos) {
   const name = path.basename(repo), src = path.join(repo, 'frontend/src')
   const pkg = JSON.parse(await readFile(path.join(repo, 'frontend/package.json'), 'utf8'))
   const manifest = JSON.parse(await readFile(path.join(repo, 'plugin.json'), 'utf8'))
-  test(pkg.dependencies['@codex-proxy/ui'] === 'https://github.com/zyycn/codex-proxy-ui/releases/download/v0.7.0/codex-proxy-ui-0.7.0.tgz', `${name}: UI release must be pinned`)
+  test(pkg.dependencies['@codex-proxy/ui'] === 'https://github.com/zyycn/codex-proxy-ui/releases/download/v0.8.0/codex-proxy-ui-0.8.0.tgz', `${name}: UI release must be pinned`)
   const lock = await readFile(path.join(repo, 'frontend/pnpm-lock.yaml'), 'utf8')
-  test(lock.includes('codex-proxy-ui-0.7.0.tgz') && lock.includes('integrity:'), `${name}: release integrity lock is missing`)
+  test(lock.includes('codex-proxy-ui-0.8.0.tgz') && lock.includes('integrity:'), `${name}: release integrity lock is missing`)
   const cargo = await readFile(path.join(repo, 'backend/Cargo.toml'), 'utf8')
   test(/gateway-plugin-sdk\s*=\s*\{[^\n]*rev\s*=\s*"[a-f0-9]{40}"/.test(cargo), `${name}: public SDK must be pinned`)
   test(!/gateway-(?:core|api|admin|host)\s*=/.test(cargo), `${name}: host internal dependencies are not allowed`)
@@ -38,6 +38,9 @@ for (const repo of repos) {
   }
   const entry = await readFile(path.join(src, 'main.ts'), 'utf8')
   test(entry.includes("'@codex-proxy/ui/styles.css'"), `${name}: public UI styles are required`)
+  const uiTheme = await import(pathToFileURL(path.join(repo, 'frontend/node_modules/@codex-proxy/ui/dist/theme/index.js')).href)
+  // The host adds font-family and font-family-code alongside the public UI tokens
+  const themeVars = uiTheme.createThemeVars({ ...uiTheme.createTheme().tokens, 'font-family': '', 'font-family-code': '' })
   const css = await readFile(path.join(src, 'utilities.css'), 'utf8')
   test(css.includes("'@codex-proxy/ui/tailwind.css'"), `${name}: public Tailwind token map is required`)
   for (const file of await files(src)) {
@@ -46,6 +49,10 @@ for (const repo of repos) {
     test(!/\b(?:fetch|XMLHttpRequest)\s*\(|document\.cookie|window\.(?:parent|top)/.test(source), `${relative}: bypasses isolated management bridge`)
     test(!/[。；]/.test(source), `${relative}: UI punctuation violates theme guidance`)
     if (file.endsWith('.css')) {
+      test(!source.includes('--cp-'), `${relative}: legacy theme variables are incompatible with CPR 3.37.2`)
+      for (const [, variable] of source.matchAll(/var\((--z-[\w-]+)/g)) {
+        test(Object.hasOwn(themeVars, variable), `${relative}: unknown public theme variable ${variable}`)
+      }
       test(!/#(?:[a-f0-9]{3}|[a-f0-9]{6})\b|\b(?:rgb|rgba|hsl|hsla)\(/i.test(source), `${relative}: fixed palette bypasses theme tokens`)
       postcss.parse(source).walkRules(rule => {
         if (!rule.selector.split(',').some(selector => [':root', 'html', 'body', '#app', 'main', '.quota-manager', '.work-area'].includes(selector.trim()))) return
