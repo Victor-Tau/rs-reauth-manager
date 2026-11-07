@@ -111,7 +111,6 @@ pub async fn scan(host: &HostClient, queue: &mut Queue) -> Result<bool, PluginFa
         }
         if !queue.automation.matches(a)
             || a["notesValid"] != true
-            || a["proxy"].as_str().is_none_or(str::is_empty)
             || queue.auto_attempts.contains_key(id)
             || queue.jobs.iter().any(|j| j.account_id == id && j.active())
             || queue

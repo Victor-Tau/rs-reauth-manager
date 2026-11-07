@@ -10,7 +10,7 @@ from runner import authorization
 
 data = json.load(sys.stdin)
 if data.get("mode") == "logout":
-    assert data["proxy"] == "http://fixture:pass@127.0.0.1:21001"
+    assert data["proxy"] == ("" if data["email"].startswith("logout_direct") else "http://fixture:pass@127.0.0.1:21001")
     assert data["accessToken"] == "old-access"
     assert data["accountId"] == "original-workspace"
     assert "notes" not in data and "authorizationUrl" not in data
@@ -23,7 +23,7 @@ if data.get("mode") == "logout":
     else:
         print(json.dumps({"event": "logout_complete"}), flush=True)
     sys.exit(0)
-assert data["proxy"] == "http://fixture:pass@127.0.0.1:21001" or data.get("mode") == "import" and data["proxy"] == ""
+assert data["proxy"] == ("" if data["email"].startswith(("direct_", "import-direct")) else "http://fixture:pass@127.0.0.1:21001")
 assert "----" in data["notes"]
 assert data["email"] in data["notes"]
 assert data["authorizationUrl"].startswith("https://chatgpt.com/codex/desktop-auth?")

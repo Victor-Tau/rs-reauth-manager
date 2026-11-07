@@ -106,16 +106,19 @@ class ProtocolTests(unittest.TestCase):
         self.run_login()
         self.assertEqual(self.messages[-1]["code"], "workspace")
 
-    def test_import_direct_connection_is_explicit_and_reauth_still_requires_proxy(self):
-        self.data.update(mode="import", accountId="", proxy="")
-        with patch.object(Chat, "__init__", return_value=None) as chat_init:
-            with self.assertRaises(AttributeError):
+    def test_import_and_reauth_preserve_explicit_direct_connection(self):
+        self.data["proxy"] = ""
+        def direct_chat(chat, **kwargs):
+            self.assertIsNone(kwargs["proxy"])
+            chat.session = Session()
+            chat.ua, chat.impersonate = "fixture", "chrome133a"
+        for mode in ["import", "reauth"]:
+            with self.subTest(mode=mode), patch.object(Chat, "__init__", direct_chat), patch.object(OAuth, "__init__", autospec=True) as oauth_init:
+                oauth_init.side_effect = lambda oauth, config, **kwargs: setattr(oauth, "session", Session())
+                self.data["mode"] = mode
                 self.run_login()
-            self.assertEqual(chat_init.call_args.kwargs["proxy"], None)
-        self.data.pop("mode")
-        with patch.object(Chat, "__init__", side_effect=AssertionError("No session allowed")):
-            with self.assertRaisesRegex(ValueError, "proxy"):
-                self.run_login()
+                self.assertIsNone(oauth_init.call_args.kwargs["proxy"])
+                self.assertEqual(self.messages[-1]["event"], "complete")
 
     def test_notes_exact_format_and_email(self):
         self.assertEqual(runner.parse_notes(self.data["notes"], EMAIL)[0], EMAIL)
@@ -220,10 +223,16 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(self.messages[-1]["code"], 'human')
         self.assertEqual(self.messages[-1]['diagnostic']['reason'], 'phone_required')
 
-    def test_no_direct_fallback(self):
-        self.data["proxy"] = ""
-        with self.assertRaisesRegex(ValueError, "proxy"):
-            self.run_login()
+    def test_invalid_or_unknown_proxy_never_falls_back_to_direct(self):
+        with patch.object(Chat, "__init__", side_effect=AssertionError("No session allowed")):
+            for proxy in [None, False, 1, {}, " ", "invalid", "ftp://127.0.0.1", "http://"]:
+                with self.subTest(proxy=proxy):
+                    self.data["proxy"] = proxy
+                    with self.assertRaisesRegex(ValueError, "^proxy$"):
+                        self.run_login()
+            self.data.pop("proxy")
+            with self.assertRaisesRegex(ValueError, "^proxy$"):
+                self.run_login()
 
 
 if __name__ == "__main__":

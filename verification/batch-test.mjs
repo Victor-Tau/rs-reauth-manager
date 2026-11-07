@@ -180,7 +180,18 @@ try {
   failConfig = true; await state.setEnabled(true); assert.equal(state.enabled.value, false); assert.match(state.error.value, /config failed/)
   failConfig = false; await state.setEnabled(true); assert.equal(state.enabled.value, true)
   check('Failed settings writes preserve the server state and reopening requires a successful save')
-  jobs = []; await state.load(); const logoutTarget = { ...accounts[0], notesValid: false }; accounts[0] = logoutTarget; await state.load()
+  jobs = []; accounts[3].proxy = null; await state.load()
+  const directTarget = state.accounts.value.find(a => a.id === 'healthy')
+  assert.equal(state.ready(directTarget), true); assert.equal(state.logoutReady(directTarget), true)
+  assert.ok(state.pageCandidates.value.some(a => a.id === directTarget.id))
+  state.filter.value = 'invalid'; assert.ok(!state.filtered.value.some(a => a.id === directTarget.id)); state.filter.value = 'all'
+  state.selectOne(directTarget.id, true); assert.ok(state.chosen.value.some(a => a.id === directTarget.id))
+  state.confirm([directTarget]); await state.submit(); assert.equal(state.success.value, 1)
+  jobs.push(job(directTarget.id, 'running', 'direct-active')); await state.load()
+  assert.equal(state.ready(directTarget), false); assert.equal(state.logoutReady(directTarget), false)
+  jobs = []; await state.load()
+  check('Direct accounts can be selected and reauthorized, are not invalid, and still reject concurrent tasks')
+  const logoutTarget = { ...accounts[0], notesValid: false, proxy: null }; accounts[0] = logoutTarget; await state.load()
   assert.equal(state.ready(logoutTarget), false); assert.equal(state.logoutReady(logoutTarget), true)
   let logoutCalls = calls.filter(c => c.path === 'api/logout').length
   state.confirmLogout([logoutTarget]); state.showLogout.value = false

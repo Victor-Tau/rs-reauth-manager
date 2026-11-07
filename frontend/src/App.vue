@@ -29,12 +29,12 @@ const { accounts, jobs, selected, loading, busy, enabled, error, search, plan, g
 const logRequestId = ref('')
 const logJob = computed(() => jobs.value.find(job => job.requestId === logRequestId.value))
 const showLogs = computed({ get: () => !!logRequestId.value, set: value => { if (!value) logRequestId.value = '' } })
-const statusOptions = [{ value: 'all', label: '全部状态' }, { value: 'error', label: '账号异常' }, { value: 'ready', label: '可重新授权' }, { value: 'active', label: '处理中' }, { value: 'failed', label: '本次未完成' }, { value: 'success', label: '本次成功' }, { value: 'invalid', label: '备注或代理缺失' }, { value: 'disabled', label: '已停用' }]
+const statusOptions = [{ value: 'all', label: '全部状态' }, { value: 'error', label: '账号异常' }, { value: 'ready', label: '可重新授权' }, { value: 'active', label: '处理中' }, { value: 'failed', label: '本次未完成' }, { value: 'success', label: '本次成功' }, { value: 'invalid', label: '备注待检查' }, { value: 'disabled', label: '已停用' }]
 const baseColumns: TableColumn<Account>[] = [{ key: 'select', label: '', width: 48 }, { key: 'identity', label: '账号', kind: 'identity', minWidth: 300 }, { key: 'status', label: '账号状态', width: 120 }, { key: 'credentials', label: '授权条件', minWidth: 210 }, { key: 'result', label: '最近操作', minWidth: 230 }, { key: 'actions', label: '操作', kind: 'actions', width: 250 }]
 const compactColumns = baseColumns.filter(column => ['select', 'identity', 'actions'].includes(column.key))
 const failedStates = ['failed', 'review', 'interrupted']
 const tiles = computed(() => [
-  { key: 'error' as const, label: '可处理', value: eligibleCount.value, caption: '账号状态异常，需要更新授权', tone: 'warning' as const, icon: ShieldAlert, hint: '显示所有需要更新 RT 的异常账号，按 RS 异常状态统计，包含资料或代理未齐的账号' },
+  { key: 'error' as const, label: '可处理', value: eligibleCount.value, caption: '账号状态异常，需要更新授权', tone: 'warning' as const, icon: ShieldAlert, hint: '显示所有需要更新 RT 的异常账号，按 RS 异常状态统计，包含资料未齐的账号' },
   { key: 'active' as const, label: '队列', value: active.value, caption: '等待及运行中的后台任务', tone: 'info' as const, icon: Hourglass, hint: '显示正在排队或运行的账号' },
   { key: 'success' as const, label: '本次成功', value: success.value, caption: '本页提交后已写回，刷新页面归零', tone: 'success' as const, icon: CircleCheck, hint: '显示本次任务成功的账号，重新进入页面归零' },
   { key: 'failed' as const, label: '本次未完成', value: failed.value, caption: '失败、需核对或中断', tone: failed.value ? 'danger' as const : 'default' as const, icon: CircleX, hint: '显示本次任务未完成的账号，重新进入页面归零' },
@@ -45,7 +45,7 @@ function updateCompact() { compact.value = !!media?.matches }
 onMounted(() => { media = window.matchMedia('(max-width: 700px)'); updateCompact(); media.addEventListener('change', updateCompact) })
 onUnmounted(() => media?.removeEventListener('change', updateCompact))
 const columns = computed(() => compact.value ? compactColumns.map(column => column.key === 'actions' ? { ...column, width: 112 } : column.key === 'identity' ? { ...column, minWidth: 160 } : column) : baseColumns)
-const proxyText = (a: Account) => a.proxy || '未绑定代理'
+const proxyText = (a: Account) => a.proxy || '直连（不使用代理）'
 const resultTone = (a: Account) => jobTone(resultOf(a))
 </script>
 
@@ -97,7 +97,7 @@ const resultTone = (a: Account) => jobTone(resultOf(a))
                 <div v-if="!compact" class="identity-meta"><ZTag :type="planType(row.planType)" size="small">{{ planLabel(row.planType || 'unknown') }}</ZTag><template v-if="row.groups.length"><ZTag v-for="g in row.groups" :key="g.id" size="small" :title="g.name">{{ g.name }}</ZTag></template><span v-else class="muted">未分组</span></div>
                 <div v-if="compact" class="mobile-details">
                   <span class="mobile-line"><ZTag :type="statusTone(row)" size="small">{{ statusText(row) }}</ZTag><ZTag :type="row.notesValid ? 'success' : 'danger'" size="small">{{ row.notesValid ? '资料齐全' : '备注待检查' }}</ZTag></span>
-                  <span class="mono" :class="{ danger: !row.proxy }">{{ proxyText(row) }}</span>
+                  <span class="mono">{{ proxyText(row) }}</span>
                   <span :class="{ success: resultOf(row)?.status === 'success', danger: failedStates.includes(resultOf(row)?.status || '') }"><span>{{ progress(resultOf(row)) }}</span><span v-if="resultOf(row)?.message"> · {{ resultMessage(resultOf(row)) }}</span></span>
                   <ZButton v-if="resultOf(row)" size="small" @click="logRequestId = resultOf(row)!.requestId">查看日志</ZButton>
                 </div>
@@ -108,7 +108,7 @@ const resultTone = (a: Account) => jobTone(resultOf(a))
           <template #credentials="{ row }">
             <div class="cred">
               <span class="cred-line"><ZTag :type="row.notesValid ? 'success' : 'danger'" size="small">{{ row.notesValid ? '资料齐全' : '备注待检查' }}</ZTag><span class="expiry" :class="`expiry-${expiryInfo(row.accessTokenExpiresAt).tone}`" :title="expiryInfo(row.accessTokenExpiresAt).title">令牌 {{ expiryInfo(row.accessTokenExpiresAt).text }}</span></span>
-              <span class="proxy" :class="{ danger: !row.proxy }" :title="proxyText(row)">{{ proxyText(row) }}</span>
+              <span class="proxy" :title="proxyText(row)">{{ proxyText(row) }}</span>
             </div>
           </template>
           <template #result="{ row }">
@@ -136,7 +136,7 @@ const resultTone = (a: Account) => jobTone(resultOf(a))
     <ZDialog v-model="showLogs" title="任务详细日志" width="48rem"><JobLogs v-if="logJob" :job="logJob" expanded /><p v-else class="muted">该任务已不在最近记录中</p></ZDialog>
     <ZDialog v-model="showLogout" type="danger" title="确认退出所有登录" width="34rem" :show-close="!busy" :close-on-click-modal="!busy" :close-on-press-escape="!busy">
       <p>将退出以下 {{ logoutTargets.length }} 个账号在所有设备上的登录</p><ul class="targets"><li v-for="a in logoutTargets" :key="a.id">{{ a.email || a.name }}</li></ul>
-      <Notice tone="danger">执行前停止所选账号的 CPR 调度，现有授权可能失效，所有设备可能需要重新登录</Notice><p class="muted">使用各账号现有授权和绑定代理，不会自动重试或重新登录，需要恢复时请手动重新授权</p>
+      <Notice tone="danger">执行前停止所选账号的 CPR 调度，现有授权可能失效，所有设备可能需要重新登录</Notice><p class="muted">使用各账号现有授权及原出站设置（直连或绑定代理），不会自动重试或重新登录，需要恢复时请手动重新授权</p>
       <p v-if="error" class="danger" role="alert">{{ error }}</p>
       <template #footer><ZButton :disabled="busy" @click="showLogout = false">取消</ZButton><ZButton type="danger" :loading="busy" :disabled="!enabled || busy" @click="submitLogout">确认退出并停止调度</ZButton></template>
     </ZDialog>

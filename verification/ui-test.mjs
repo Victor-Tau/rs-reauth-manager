@@ -17,7 +17,7 @@ try {
       document.addEventListener('DOMContentLoaded', () => { for (const [key, value] of Object.entries(tokens)) document.documentElement.style.setProperty(key, value) })
       let enabled = true, jobs = []
       let automation = { enabled: false, intervalMinutes: 15, cooldownHours: 24, allGroups: true, groupIds: [], includeUngrouped: true, statuses: ['error'], allPlans: true, plans: [], enabledOnly: true }
-      const account = { id: 'fixture', name: 'fixture', email: 'fixture@example.com', enabled: true, planType: 'free', status: 'error', accessTokenExpiresAt: null, proxy: 'http://127.0.0.1:21001', notesValid: true, groups: [{ id: 'g1', name: '测试组' }, { id: 'g2', name: '共享组' }] }
+      const account = { id: 'fixture', name: 'fixture', email: 'fixture@example.com', enabled: true, planType: 'free', status: 'error', accessTokenExpiresAt: null, proxy: null, notesValid: true, groups: [{ id: 'g1', name: '测试组' }, { id: 'g2', name: '共享组' }] }
       const accounts = [account, { ...account, id: 'second', email: 'second@example.com', groups: [{ id: 'g2', name: '共享组' }] }, { ...account, id: 'ungrouped', email: 'ungrouped@example.com', groups: [] }]
       window.__calls = []
       window.codexProxyPlugin = { version: 2, theme: 'light', async request(input) {
@@ -62,6 +62,13 @@ try {
     const scope = page.frameLocator('iframe')
     const child = page.frames().find(f => f !== page.mainFrame())
     await scope.getByText('插件已开启', { exact: true }).waitFor()
+    await scope.getByText('直连（不使用代理）', { exact: true }).first().waitFor()
+    const directReauth = scope.getByRole('button', { name: '重新授权 fixture@example.com', exact: true })
+    assert.equal(await directReauth.isEnabled(), true)
+    await directReauth.click()
+    const reauthDialog = scope.getByRole('dialog', { name: '确认重新授权', exact: true })
+    await reauthDialog.getByRole('button', { name: '取消', exact: true }).click()
+    assert.equal(await child.evaluate(() => window.__calls.filter(c => c.path === 'api/submit').length), 0)
     for (const scheme of ['dark', 'light']) {
       const colors = await child.evaluate(({ scheme, tokens }) => {
         for (const [key, value] of Object.entries(tokens)) document.documentElement.style.setProperty(key, value)

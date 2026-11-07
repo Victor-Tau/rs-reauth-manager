@@ -66,7 +66,7 @@ onMounted(load)
             <div class="field-block"><h3>订阅范围</h3><ZCheckbox v-model="config.allPlans" label="全部订阅" /><div v-if="!config.allPlans" class="choice-grid"><ZCheckbox v-for="p in plans" :key="p" :model-value="config.plans.includes(p)" :label="planLabel(p)" @change="toggle('plans', p, $event)" /></div></div>
           </div>
         </ZCard>
-        <Notice tone="info">当前条件匹配 {{ matches.length }} 个账号，其中 {{ matches.filter(a => a.notesValid && a.proxy).length }} 个具备备注和代理，实际执行还会检查账号空闲、冷却及在途任务</Notice>
+        <Notice tone="info">当前条件匹配 {{ matches.length }} 个账号，其中 {{ matches.filter(a => a.notesValid).length }} 个登录资料齐全，按账号原出站设置直连或使用代理，实际执行还会检查账号空闲、冷却及在途任务</Notice>
         <p class="muted">后台扫描由 CPR 维护回调推进，页面关闭后继续生效，写回结果不确定或进程中断的账号不会自动重试，请先手动核对并重新授权，更新配置会取消尚未执行的自动任务</p>
         <div class="form-actions"><ZButton type="primary" :loading="saving" @click="save">保存配置</ZButton><span v-if="saved" class="success" role="status">配置已保存</span></div>
       </fieldset>

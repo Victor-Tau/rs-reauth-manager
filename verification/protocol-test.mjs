@@ -10,8 +10,8 @@ const worker = fileURLToPath(new URL('./fake-worker.py', import.meta.url))
 const innerAuthorization = 'https://auth.openai.com/oauth/authorize?' + new URLSearchParams({ response_type: 'code', client_id: 'fixture', redirect_uri: 'http://127.0.0.1:1455/auth/callback', state: 'fixture', code_challenge: 'a'.repeat(43), code_challenge_method: 'S256' })
 const nativeAuthorization = 'https://chatgpt.com/codex/desktop-auth?' + new URLSearchParams({ authorize_url: innerAuthorization, codex_streamlined_login: 'true', no_universal_links: '1' })
 const make = (id, prefix = id) => ({ id, provider: 'openai', name: `team+${prefix}@example.com+workspace3`, email: `${prefix}@example.com`, authenticationKind: 'oauth', enabled: id !== 'disabled', planType: 'team', status: 'error', notes: `${prefix}@example.com----fixture-password----GEZDGNBVGY3TQOJQ`, outboundProxyEndpoint: 'http://127.0.0.1:21001', accountId: 'original-workspace', groups: [{ id: 'g1', name: 'Team' }], weight: 3, concurrencyLimit: null, modelAccess: { mode: 'all' }, hasRefreshToken: true, accessTokenExpiresAt: '2026-10-23T00:00:00Z', capacity: { usedSlots: 0, totalSlots: null } })
-const accounts = [make('good'), make('disabled'), make('slow'), make('failed'), make('missing_proxy'), make('bad_notes'), make('changed'), make('active'), make('uncertain')]
-accounts.find(a => a.id === 'missing_proxy').outboundProxyEndpoint = null
+const accounts = [make('good'), make('disabled'), make('slow'), make('failed'), make('direct_null'), make('bad_notes'), make('changed'), make('active'), make('uncertain')]
+accounts.find(a => a.id === 'direct_null').outboundProxyEndpoint = null
 accounts.find(a => a.id === 'bad_notes').notes = 'different@example.com----fixture-password----GEZDGNBVGY3TQOJQ'
 accounts.find(a => a.id === 'active').capacity.usedSlots = 1
 const free = make('free'); free.planType = ' Free '; accounts.push(free)
@@ -110,6 +110,7 @@ async function callback(meta, payload) {
     else if (url.pathname === '/api/admin/accounts/export') {
       assert.equal(meta.params.method, 'GET'); assert.equal(url.searchParams.get('confirm'), 'export_sensitive_accounts')
       const id = url.searchParams.get('accountIds'); assert.ok(!id.includes(','))
+      assert.ok(accounts.find(a => a.id === id).outboundProxyEndpoint, 'Direct accounts must not export proxy credentials')
       dataReply = { documents: [{ provider: 'openai', document: { accounts: [{ id, outboundProxyUrl: 'http://fixture:pass@127.0.0.1:21001', refreshToken: 'old-secret-rt' }] } }] }
     }
     else if (url.pathname === '/api/admin/accounts/oauth/start') {
@@ -216,8 +217,23 @@ try {
   const before = structuredClone(accounts.find(a => a.id === 'good')); await tick(); assert.equal(starts.length, 1); assert.equal(completes.length, 0); const done = await finish('good'); assert.equal(done.status, 'success'); const after = accounts.find(a => a.id === 'good'); for (const k of ['enabled', 'groups', 'notes', 'weight', 'concurrencyLimit', 'outboundProxyEndpoint', 'name', 'accountId']) assert.deepEqual(after[k], before[k]); check('Real SDK process completes native OAuth start/complete and verifies unchanged configuration')
   await submit(['disabled']); assert.equal((await finish('disabled')).status, 'success'); assert.equal(accounts.find(a => a.id === 'disabled').enabled, false); check('Disabled account remains disabled after reauthorization')
   const freeBefore = structuredClone(free); const freeStarts = starts.length, freeCompletes = completes.length; await submit(['free']); assert.equal((await finish('free')).status, 'success'); assert.equal(starts.length, freeStarts + 1); assert.equal(completes.length, freeCompletes + 1); for (const k of ['id', 'enabled', 'groups', 'notes', 'outboundProxyEndpoint', 'name', 'accountId', 'planType']) assert.deepEqual(free[k], freeBefore[k]); check('Free account completes original-account authorization while preserving proxy and configuration')
-  for (const id of ['missing_proxy', 'bad_notes', 'active', 'api_key', 'other_provider']) { const old = starts.length; await submit([id]); assert.equal((await finish(id)).status, 'failed'); assert.equal(starts.length, old) } check('Missing proxy, invalid notes, active requests and unsupported credentials stop before login')
+  for (const id of ['bad_notes', 'active', 'api_key', 'other_provider']) { const old = starts.length; await submit([id]); assert.equal((await finish(id)).status, 'failed'); assert.equal(starts.length, old) } check('Invalid notes, active requests and unsupported credentials stop before login')
   const proxyAccount = id => { const a = make(id); accounts.push(a); revisions.set(id, 1); return a }
+  const directEmpty = proxyAccount('direct_empty'); directEmpty.outboundProxyEndpoint = ''
+  for (const a of [accounts.find(a => a.id === 'direct_null'), directEmpty]) {
+    const before = structuredClone(a); await submit([a.id]); assert.equal((await finish(a.id)).status, 'success')
+    for (const key of ['id', 'enabled', 'groups', 'notes', 'outboundProxyEndpoint', 'name', 'accountId']) assert.deepEqual(a[key], before[key])
+  }
+  check('Null and empty proxy settings complete reauthorization through direct workers without exporting credentials or changing settings')
+  for (const value of [undefined, false]) {
+    const a = proxyAccount(`invalid_proxy_${String(value)}`); a.outboundProxyEndpoint = value
+    const old = starts.length; await submit([a.id]); assert.equal((await finish(a.id)).status, 'failed'); assert.equal(starts.length, old)
+  }
+  check('Missing or malformed proxy state is not treated as permission to connect directly')
+  const directChanged = proxyAccount('direct_changed'); directChanged.outboundProxyEndpoint = null
+  await submit([directChanged.id]); await tick(); directChanged.outboundProxyEndpoint = proxies[0].endpoint
+  const beforeDirectChange = completes.length; assert.equal((await finish(directChanged.id)).status, 'review'); assert.equal(completes.length, beforeDirectChange)
+  check('Switching a direct account to a proxy during login prevents stale writeback')
   const offProxy = { ...proxies[0], id: 'proxy_disabled', enabled: false }; proxies.unshift(offProxy)
   const exact = proxyAccount('proxy_exact_binding'); await submit([exact.id]); assert.equal((await finish(exact.id)).status, 'success'); check('Same endpoint with different proxy credentials is resolved by exact account membership')
   const off = proxyAccount('proxy_disabled_account'); accountProxies.set(off.id, offProxy.id)
@@ -402,12 +418,24 @@ try {
   check('Successful manual verification clears the automatic block despite an older review record')
   assert.equal((await request('config', { enabled: true, automation: { ...autoConfig, enabled: false } })).status, 200)
   check('Maintenance scans intersect group/status/plan, persist configuration/cooldown and avoid duplicate authorization after restart')
+  const directAuto = proxyAccount('direct_auto'); directAuto.outboundProxyEndpoint = null; directAuto.planType = 'free'; directAuto.groups = [{ id: 'direct-only', name: 'Direct only' }]
+  const directConfig = { ...autoConfig, allGroups: false, groupIds: ['direct-only'], includeUngrouped: false, intervalMinutes: 1 }
+  await request('config', { enabled: true, automation: directConfig })
+  const directStarts = starts.length; await call('plugin.reconcile', {}, Buffer.alloc(0), 'maintenance')
+  assert.equal(starts.length, directStarts + 1); assert.equal(job(directAuto.id).automatic, true); assert.equal((await finish(directAuto.id)).status, 'success')
+  directAuto.status = 'error'; records.get('queue').value.last_scan_at = 0; await tick(); assert.equal(starts.length, directStarts + 1)
+  await request('config', { enabled: true, automation: { ...directConfig, enabled: false } })
+  check('One-minute maintenance scans reauthorize direct accounts and preserve cooldown protection')
 
   const logoutStartCount = starts.length, logoutCompleteCount = completes.length, logoutSaveCount = saves.length
-  for (const id of ['logout_good', 'logout_rejected', 'logout_uncertain', 'logout_changed', 'logout_slow', 'logout_next', 'logout_no_token', 'logout_busy']) {
+  for (const id of ['logout_good', 'logout_direct', 'logout_rejected', 'logout_uncertain', 'logout_changed', 'logout_slow', 'logout_next', 'logout_no_token', 'logout_busy']) {
     const a = make(id); a.notes = ''; accounts.push(a); revisions.set(id, 1)
   }
   const logoutRequest = (ids, requestId = randomUUID(), confirmation = 'logout_all_and_disable') => request('logout', { accountIds: ids, requestId, confirmation })
+  const directLogout = accounts.find(a => a.id === 'logout_direct'); directLogout.outboundProxyEndpoint = null
+  await logoutRequest([directLogout.id]); assert.equal((await finish(directLogout.id)).step, 'logged_out')
+  assert.equal(directLogout.enabled, false); assert.equal(directLogout.outboundProxyEndpoint, null)
+  check('Direct logout uses existing credentials, stops scheduling and preserves the direct connection setting')
   assert.equal((await logoutRequest(['logout_good'], randomUUID(), '')).status, 400)
   assert.equal((await logoutRequest(['logout_good', 'logout_good'])).status, 400)
   await request('config', { enabled: false }); assert.equal((await logoutRequest(['logout_good'])).status, 400); await request('config', { enabled: true })

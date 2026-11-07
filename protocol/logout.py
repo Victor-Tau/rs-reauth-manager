@@ -12,7 +12,7 @@ def run_logout(data, emit):
     proxy = data.get("proxy")
     token = data.get("accessToken")
     account = data.get("accountId")
-    if not isinstance(proxy, str) or urlsplit(proxy).scheme not in {"http", "https", "socks5", "socks5h"} or not urlsplit(proxy).hostname:
+    if not isinstance(proxy, str) or proxy and (urlsplit(proxy).scheme not in {"http", "https", "socks5", "socks5h"} or not urlsplit(proxy).hostname):
         emit("error", code="logout_credentials")
         return
     if not isinstance(token, str) or not token or len(token) > 16384 or any(ord(c) <= 32 or ord(c) == 127 for c in token) or not isinstance(account, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", account):
@@ -42,7 +42,7 @@ def run_logout(data, emit):
             return
     session = None
     try:
-        session = create_http_session(proxy=proxy, impersonate="chrome133a")
+        session = create_http_session(proxy=proxy or None, impersonate="chrome133a")
         # The requests fallback normally retries POST; logout must be sent only once
         import requests
         if isinstance(session, requests.Session):

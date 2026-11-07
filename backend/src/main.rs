@@ -324,14 +324,12 @@ async fn detail(host: &HostClient, id: &str) -> Result<Value, PluginFault> {
     Ok(a)
 }
 async fn proxy(host: &HostClient, a: &Value) -> Result<String, PluginFault> {
+    // 保留原账号直连设置；绑定代理的账号仍只使用其完整代理，不降级直连
+    if proxies::endpoint(a)?.is_none() {
+        return Ok(String::new());
+    }
     // 只在内存中读取单账号完整代理，不保存导出材料
     let id = a["id"].as_str().ok_or_else(|| fault("账号 ID 无效"))?;
-    if a["outboundProxyEndpoint"]
-        .as_str()
-        .is_none_or(str::is_empty)
-    {
-        return Err(fault("原账号未绑定代理，不会改用直连或其他代理"));
-    }
     let data = admin(
         host,
         "GET",

@@ -63,8 +63,15 @@ class LogoutTests(unittest.TestCase):
         self.assertEqual(len(self.calls), 1)
         self.assertEqual(self.messages[-1], {"event": "error", "code": "logout_uncertain"})
 
-    def test_missing_proxy_token_identity_and_header_injection_stop_before_network(self):
-        for key, value in [("proxy", ""), ("accessToken", ""), ("accessToken", "bad\r\nvalue"), ("accountId", ""), ("cookies", [{"name": "bad;name", "value": "value"}]), ("cookies", [{"name": "fixture", "value": "bad\r\nvalue"}])]:
+    def test_explicit_direct_connection_uses_no_proxy(self):
+        self.data["proxy"] = ""
+        create = self.execute()
+        create.assert_called_once_with(proxy=None, impersonate="chrome133a")
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(self.messages[-1], {"event": "logout_complete"})
+
+    def test_invalid_proxy_token_identity_and_header_injection_stop_before_network(self):
+        for key, value in [("proxy", None), ("proxy", False), ("proxy", "invalid"), ("proxy", "ftp://127.0.0.1"), ("accessToken", ""), ("accessToken", "bad\r\nvalue"), ("accountId", ""), ("cookies", [{"name": "bad;name", "value": "value"}]), ("cookies", [{"name": "fixture", "value": "bad\r\nvalue"}])]:
             with self.subTest(key=key, value=value):
                 data = dict(self.data, **{key: value})
                 with patch.object(logout, "create_http_session", side_effect=AssertionError("No network allowed")), patch.object(runner, "emit") as emit:

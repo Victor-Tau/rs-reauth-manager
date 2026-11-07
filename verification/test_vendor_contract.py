@@ -81,14 +81,14 @@ class VendorContractTests(unittest.TestCase):
         self.assertEqual(messages[-1]['code'], 'limited')
         self.assertEqual(messages[-1]['diagnostic'], {'stage':'mfa_verify', 'reason':'rate_limited', 'httpStatus':429})
 
-    def execute(self, url, state="fixture", workspace="original-workspace", importing=False, consent_page=False):
+    def execute(self, url, state="fixture", workspace="original-workspace", importing=False, consent_page=False, proxy="http://fixture:pass@127.0.0.1:21001"):
         self.messages, self.requests = [], []
-        data = {"notes": f"{EMAIL}----fixture-password----{SECRET}", "email": EMAIL, "proxy": "http://fixture:pass@127.0.0.1:21001", "authorizationUrl": url, "accountId": "original-workspace"}
+        data = {"notes": f"{EMAIL}----fixture-password----{SECRET}", "email": EMAIL, "proxy": proxy, "authorizationUrl": url, "accountId": "original-workspace"}
         if importing:
             data.update(mode="import", accountId="")
 
         def session(**kwargs):
-            self.assertEqual(kwargs["proxy"], data["proxy"])
+            self.assertEqual(kwargs["proxy"] or None, data["proxy"] or None)
             return OfflineSession(self.requests, state, workspace, consent_page)
 
         with patch.object(chatgpt_client, "create_http_session", side_effect=session), patch.object(oauth_client, "create_http_session", side_effect=session), patch.object(socket, "create_connection", side_effect=AssertionError("Network forbidden")), patch.object(runner, "emit", side_effect=lambda event, **fields: self.messages.append({"event": event, **fields})):
@@ -104,6 +104,23 @@ class VendorContractTests(unittest.TestCase):
         self.execute(URL)
         self.assertEqual(self.requests, [("GET", URL)])
         self.assertEqual(self.messages[-1]["event"], "complete")
+
+    def test_direct_account_uses_real_upstream_without_proxy(self):
+        self.execute(desktop_url(), proxy="")
+        self.assertEqual(self.requests, [("GET", URL)])
+        self.assertEqual(self.messages[-1]["event"], "complete")
+
+    def test_direct_sessions_ignore_environment_proxy(self):
+        from vendor.lib import http_client
+        with patch.dict('os.environ', {'HTTPS_PROXY': 'http://unrelated.invalid:9999', 'ALL_PROXY': 'socks5://unrelated.invalid:9999'}):
+            for curl in [None, http_client.CffiSession]:
+                with self.subTest(curl=curl), patch.object(http_client, 'CffiSession', curl):
+                    session = http_client.create_http_session(proxy=None, impersonate="chrome133a")
+                    try:
+                        self.assertFalse(session.trust_env)
+                        self.assertFalse(any(session.proxies.values()))
+                    finally:
+                        session.close()
 
     def test_personal_import_callback_without_workspace_cookie(self):
         self.execute(desktop_url(), workspace=None, importing=True)

@@ -80,10 +80,12 @@ def run(data):
         return
     email, password, secret = parse_notes(data["notes"], data["email"])
     authorize_url, state, redirect = authorization(data["authorizationUrl"])
-    proxy = str(data["proxy"])
+    proxy = data.get("proxy")
     importing = data.get("mode") == "import"
+    if not isinstance(proxy, str):
+        raise ValueError("proxy")
     parsed_proxy = urlsplit(proxy)
-    if not (importing and not proxy) and (parsed_proxy.scheme not in {"http", "https", "socks5", "socks5h"} or not parsed_proxy.hostname):
+    if proxy and (parsed_proxy.scheme not in {"http", "https", "socks5", "socks5h"} or not parsed_proxy.hostname):
         raise ValueError("proxy")
     from vendor.lib.chatgpt_client import ChatGPTClient
     from vendor.lib.oauth_client import OAuthClient

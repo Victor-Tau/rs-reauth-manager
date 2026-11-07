@@ -80,11 +80,18 @@ async fn contains_account(
     Err(fault(INVALID))
 }
 
+// 只有宿主明确返回空代理时才是直连；缺失或格式异常不能作为直连降级
+pub fn endpoint(account: &Value) -> Result<Option<&str>, PluginFault> {
+    match account.get("outboundProxyEndpoint") {
+        Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) if value.is_empty() => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value)),
+        _ => Err(fault(INVALID)),
+    }
+}
+
 pub async fn binding(host: &HostClient, account: &Value) -> Result<Value, PluginFault> {
-    let Some(endpoint) = account["outboundProxyEndpoint"]
-        .as_str()
-        .filter(|value| !value.is_empty())
-    else {
+    let Some(endpoint) = endpoint(account)? else {
         return Ok(Value::Null);
     };
     let id = account["id"].as_str().ok_or_else(|| fault(INVALID))?;
@@ -121,4 +128,26 @@ pub async fn binding(host: &HostClient, account: &Value) -> Result<Value, Plugin
         }
     }
     Err(fault(INVALID))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_explicit_empty_proxy_is_direct() {
+        for value in [Value::Null, json!("")] {
+            assert_eq!(
+                endpoint(&json!({"outboundProxyEndpoint": value})).unwrap(),
+                None
+            );
+        }
+        assert_eq!(
+            endpoint(&json!({"outboundProxyEndpoint": "http://127.0.0.1:21001"})).unwrap(),
+            Some("http://127.0.0.1:21001")
+        );
+        for account in [json!({}), json!({"outboundProxyEndpoint": false})] {
+            assert!(endpoint(&account).is_err());
+        }
+    }
 }

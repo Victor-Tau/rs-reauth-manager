@@ -17,8 +17,8 @@ export function useReauthManager() {
   const batchByAccount = computed(() => new Map(batchJobs.value.map(j => [j.accountId, j])))
   const jobOf = (a: Account) => byAccount.value.get(a.id)
   const resultOf = (a: Account) => ['success', 'failed'].includes(filter.value) ? batchByAccount.value.get(a.id) : jobOf(a)
-  const ready = (a: Account) => a.notesValid && !!a.proxy && !isActive(jobOf(a))
-  const logoutReady = (a: Account) => !!a.proxy && !isActive(jobOf(a))
+  const ready = (a: Account) => a.notesValid && !isActive(jobOf(a))
+  const logoutReady = (a: Account) => !isActive(jobOf(a))
   const showForce = ref(false), forceTarget = ref<Account>(), forceSource = ref<Job>(), forceWorkspace = ref(''), forceConfirmed = ref(false)
   const showFreeFallback = ref(false), freeTarget = ref<Account>(), freeSource = ref<Job>(), freeConfirmed = ref(false)
   const canForce = (a: Account) => { const j = jobOf(a); return ready(a) && j?.status === 'failed' && !!j.workspaceChoices?.length && (j.step === 'workspace' || j.message === '无法匹配原账号工作区，已停止写回') }
@@ -71,7 +71,7 @@ export function useReauthManager() {
     if (search.value && !`${a.id} ${a.name} ${a.email || ''} ${a.proxy || ''} ${a.groups.map(group => group.name).join(' ')}`.toLowerCase().includes(search.value.trim().toLowerCase())) return false
     const job = jobOf(a)
     const batchJob = batchByAccount.value.get(a.id)
-    return filter.value === 'all' || filter.value === 'error' && needsReauth(a) || filter.value === 'ready' && ready(a) || filter.value === 'active' && isActive(job) || filter.value === 'failed' && isUnfinished(batchJob) || filter.value === 'success' && batchJob?.status === 'success' || filter.value === 'invalid' && (!a.notesValid || !a.proxy) || filter.value === 'disabled' && !a.enabled
+    return filter.value === 'all' || filter.value === 'error' && needsReauth(a) || filter.value === 'ready' && ready(a) || filter.value === 'active' && isActive(job) || filter.value === 'failed' && isUnfinished(batchJob) || filter.value === 'success' && batchJob?.status === 'success' || filter.value === 'invalid' && !a.notesValid || filter.value === 'disabled' && !a.enabled
   }))
   const visible = computed(() => filtered.value.slice((page.value - 1) * pageSize.value, page.value * pageSize.value))
   const pageCandidates = computed(() => visible.value.filter(a => ready(a) || logoutReady(a)))
