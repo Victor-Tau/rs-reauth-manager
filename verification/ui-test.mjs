@@ -44,6 +44,9 @@ try {
         else if (input.path === 'api/import') {
           jobs.push({ requestId: `${data.requestId}:import`, accountId: 'imported-account', kind: 'import', status: 'success', step: 'success', message: '账号已导入 CPR，参数校验通过', startedAt: 1, finishedAt: 2, logs: [{ at: 1, message: '授权确认 · 收到响应 · HTTP 200' }] }); result = { jobs }
         }
+        else if (input.path === 'api/import-batch') {
+          jobs.push(...data.accounts.map((a, i) => ({ requestId: `${data.requestId}:import:${i}`, label: a.email, accountId: `batch-account-${i}`, kind: 'import', status: 'success', step: 'success', message: '账号已导入 CPR，参数校验通过', startedAt: 1, finishedAt: 2 }))); result = { jobs }
+        }
         else if (input.path === 'api/tick') {
           for (const j of jobs.filter(j => j.kind === 'logout' && j.status === 'queued')) { j.status = 'success'; j.step = 'logged_out'; j.message = '上游已确认退出所有登录，已停止调度'; j.startedAt = 1; j.finishedAt = 2; j.logs = [{ at: 1, message: '退出所有登录 · 发起请求 · POST' }, { at: 2, message: '退出所有登录 · 收到响应 · HTTP 200' }]; accounts.find(a => a.id === j.accountId).enabled = false }
           result = { ok: true }
@@ -140,6 +143,7 @@ try {
     assert.deepEqual(savedConfig, { enabled: true, intervalMinutes: 30, cooldownHours: 24, allGroups: false, groupIds: ['g1'], includeUngrouped: false, statuses: ['error'], allPlans: false, plans: ['free'], enabledOnly: true })
     await page.screenshot({ path: resolve(root, `.cache/reauth-ui/config-${width}.png`), fullPage: true })
     await scope.getByRole('button', { name: '账号导入', exact: true }).click()
+    assert.equal(await scope.getByLabel('导入工作区 ID', { exact: true }).getAttribute('placeholder'), '留空默认使用返回列表中的首个工作区')
     const pastedEmail = 'fixture+import@icloud.com', pastedPassword = 'fixture&password@@ value ', pastedSecret = 'GEZDGNBVGY3TQOJQ'
     assert.equal(await scope.getByRole('spinbutton', { name: '导入账号权重', exact: true }).inputValue(), '5')
     assert.equal(await scope.getByRole('switch', { name: '导入完成后启用调度', exact: true }).isChecked(), true)
@@ -149,14 +153,19 @@ try {
       element.dispatchEvent(new ClipboardEvent('paste', { clipboardData, bubbles: true, cancelable: true }))
     }, value)
     for (const label of ['粘贴登录资料', '导入账号邮箱']) {
-      await paste(label, `${pastedEmail}----${pastedPassword}----${pastedSecret}`)
-      assert.equal(await scope.getByLabel('导入账号邮箱', { exact: true }).inputValue(), pastedEmail)
-      assert.equal(await scope.getByLabel('导入账号密码', { exact: true }).inputValue(), pastedPassword)
-      assert.equal(await scope.getByLabel('导入账号 2FA 密钥', { exact: true }).inputValue(), pastedSecret)
+      for (const [prefix, suffix] of [['', ''], ['', ' '], [' \r\n', '\r\n\t\u00a0']]) {
+        await paste(label, `${prefix}${pastedEmail}----${pastedPassword}----${pastedSecret}${suffix}`)
+        assert.equal(await scope.getByLabel('导入账号邮箱', { exact: true }).inputValue(), pastedEmail)
+        assert.equal(await scope.getByLabel('导入账号密码', { exact: true }).inputValue(), pastedPassword)
+        assert.equal(await scope.getByLabel('导入账号 2FA 密钥', { exact: true }).inputValue(), pastedSecret)
+        assert.equal(await scope.getByText('登录资料已填入，请核对后导入', { exact: true }).isVisible(), true)
+      }
     }
-    await paste('粘贴登录资料', `${pastedEmail}----bad----not-base32!`)
-    await scope.getByRole('alert').filter({ hasText: '粘贴格式无效' }).waitFor()
-    assert.equal(await scope.getByLabel('导入账号密码', { exact: true }).inputValue(), pastedPassword)
+    for (const invalid of [`${pastedEmail}----bad----not-base32!`, `${pastedEmail}----bad\npassword----${pastedSecret}`, `${pastedEmail}----bad----${pastedSecret}\r\nother@example.com----bad----${pastedSecret}`]) {
+      await paste('粘贴登录资料', invalid)
+      await scope.getByRole('alert').filter({ hasText: '粘贴格式无效' }).waitFor()
+      assert.equal(await scope.getByLabel('导入账号密码', { exact: true }).inputValue(), pastedPassword)
+    }
     await paste('粘贴登录资料', `${pastedEmail}----${pastedPassword}----${pastedSecret}`)
     await scope.getByRole('checkbox', { name: '测试组', exact: true }).locator('..').click()
     await scope.getByRole('button', { name: '登录并导入 CPR', exact: true }).click()
@@ -171,6 +180,24 @@ try {
     const importLog = scope.getByLabel('任务详细日志', { exact: true })
     await importLog.waitFor(); assert.match(await importLog.innerText(), /授权确认.*HTTP 200/)
     assert.ok(!(await importLog.innerText()).includes(pastedPassword))
+    await scope.getByRole('checkbox', { name: '批量导入（一行一个账号）', exact: true }).locator('..').click()
+    const batchInput = scope.getByLabel('批量登录资料', { exact: true })
+    const firstLine = `batch-first@example.com---- batch password ----${pastedSecret}`
+    await batchInput.fill(`${firstLine}\ninvalid-row`)
+    await scope.getByRole('button', { name: '批量登录并导入 CPR', exact: true }).click()
+    await scope.getByRole('alert').filter({ hasText: '第 2 行格式无效' }).waitFor()
+    assert.equal(await child.evaluate(() => window.__calls.filter(c => c.path === 'api/import-batch').length), 0)
+    await batchInput.fill(`\r\n${firstLine}\r\n\r\nbatch-second@example.com----second-password----${pastedSecret}\n`)
+    await scope.getByRole('button', { name: '批量登录并导入 CPR', exact: true }).click()
+    await scope.getByText('2 个导入任务已排队，可在下方逐项查看进度', { exact: true }).waitFor()
+    assert.equal(await batchInput.inputValue(), '')
+    const batchPayload = await child.evaluate(() => JSON.parse(window.__calls.find(c => c.path === 'api/import-batch').body))
+    assert.equal(batchPayload.accounts.length, 2); assert.equal(batchPayload.accounts[0].password, ' batch password ')
+    assert.deepEqual(batchPayload.accounts.map(a => a.name), ['batch-first@example.com', 'batch-second@example.com'])
+    for (const a of batchPayload.accounts) { assert.equal(a.workspaceId, ''); assert.deepEqual(a.settings.groupIds, ['g1']); assert.equal('line' in a, false) }
+    await scope.getByText('batch-first@example.com', { exact: true }).waitFor()
+    await scope.getByText('batch-second@example.com', { exact: true }).waitFor()
+    assert.ok(!(await scope.getByRole('region', { name: '账号导入', exact: true }).innerText()).includes('batch password'))
     const size = await child.evaluate(() => ({ width: document.documentElement.clientWidth, scroll: document.documentElement.scrollWidth }))
     assert.ok(size.scroll <= size.width + 1, JSON.stringify(size)); assert.deepEqual(errors, [])
     await page.screenshot({ path: resolve(root, `.cache/reauth-ui/import-${width}.png`), fullPage: true })

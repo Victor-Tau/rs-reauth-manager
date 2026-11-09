@@ -66,6 +66,22 @@ class ProtocolTests(unittest.TestCase):
         with patch.dict(sys.modules, {"vendor.lib.chatgpt_client": self.chat, "vendor.lib.oauth_client": self.oauth}), patch.object(runner, "emit", side_effect=lambda event, **kw: self.messages.append({"event": event, **kw})):
             runner.run(self.data)
 
+    def run_workspace_selection(self, html=""):
+        selected = []
+
+        def select(oauth, *args, **kwargs):
+            workspace = oauth._extract_workspace_id_from_session() or oauth._extract_workspace_id_from_html(html)
+            selected.append(workspace)
+            return (OAuth.result, "") if workspace else (None, "")
+
+        def authorize(oauth, *args, **kwargs):
+            callback, _ = oauth._select_workspace_for_callback()
+            return callback or {"ok": False, "error": "workspace"}
+
+        with patch.object(OAuth, "_select_workspace_for_callback", select, create=True), patch.object(OAuth, "authorize_external_oauth_url", authorize):
+            self.run_login()
+        return selected
+
     def test_import_selects_unique_workspace_without_existing_account(self):
         self.data.update(mode="import", accountId="")
         OAuth.cookie = {"workspaces": [{"id": "new-workspace"}]}
@@ -87,15 +103,52 @@ class ProtocolTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "^state$"):
             self.run_login()
 
-    def test_import_conflicting_session_workspace_ids_require_selection(self):
+    def test_import_prefers_first_list_workspace_over_current_workspace(self):
         self.data.update(mode="import", accountId="")
-        OAuth.cookie = {"workspace_id": "first-workspace", "workspaces": [{"id": "second-workspace"}]}
-        self.run_login()
-        self.assertEqual(self.messages[-1]["code"], "workspace")
+        OAuth.cookie = {"workspace_id": "current-workspace", "workspaces": [{"id": "listed-workspace"}]}
+        self.assertEqual(self.run_workspace_selection(), ["listed-workspace"])
+        self.assertEqual(self.messages[-1]["event"], "complete")
 
-    def test_import_multiple_workspaces_require_explicit_selection(self):
+    def test_import_multiple_workspaces_select_first_in_upstream_order(self):
         self.data.update(mode="import", accountId="")
-        OAuth.cookie = {"workspace_id": "first-workspace", "workspaces": [{"id": "first-workspace"}, {"id": "second-workspace"}]}
+        for ids in [["z-team", "a-personal"], ["a-personal", "z-team"]]:
+            with self.subTest(ids=ids):
+                OAuth.cookie = {"workspace_id": ids[-1], "workspaces": [{"id": value} for value in ids]}
+                self.assertEqual(self.run_workspace_selection(), [ids[0]])
+                self.assertEqual(self.messages[-1]["event"], "complete")
+
+    def test_import_html_workspaces_default_to_first(self):
+        self.data.update(mode="import", accountId="")
+        OAuth.cookie = {}
+        html = '<script>{"workspace_id":"a-personal","workspaces":[{"id":"z-team"},{"id":"a-personal"}]}</script>'
+        self.assertEqual(self.run_workspace_selection(html), ["z-team"])
+        self.assertEqual(self.messages[-1]["event"], "complete")
+
+    def test_import_explicit_workspace_overrides_first_from_session_or_html(self):
+        self.data.update(mode="import", accountId="chosen-workspace")
+        workspaces = [{"id": "first-workspace"}, {"id": "chosen-workspace"}]
+        for cookie, html in [({"workspaces": workspaces}, ""), ({}, json.dumps({"workspaces": workspaces}))]:
+            with self.subTest(cookie=cookie):
+                OAuth.cookie = cookie
+                self.assertEqual(self.run_workspace_selection(html), ["chosen-workspace"])
+                self.assertEqual(self.messages[-1]["event"], "complete")
+
+    def test_import_default_workspace_ignores_invalid_rows(self):
+        self.data.update(mode="import", accountId="")
+        OAuth.cookie = {"workspaces": [None, {"id": ""}, {"id": "invalid value"}, {"id": "valid-workspace"}]}
+        self.assertEqual(self.run_workspace_selection(), ["valid-workspace"])
+        self.assertEqual(self.messages[-1]["event"], "complete")
+
+    def test_import_default_workspace_still_requires_matching_state(self):
+        self.data.update(mode="import", accountId="")
+        OAuth.cookie = {"workspaces": [{"id": "first-workspace"}, {"id": "second-workspace"}]}
+        OAuth.result["state"] = "wrong"
+        with self.assertRaisesRegex(ValueError, "^state$"):
+            self.run_workspace_selection()
+
+    def test_import_multiple_workspaces_without_selection_proof_stops(self):
+        self.data.update(mode="import", accountId="")
+        OAuth.cookie = {"workspaces": [{"id": "first-workspace"}, {"id": "second-workspace"}]}
         self.run_login()
         self.assertEqual(self.messages[-1]["code"], "workspace")
         self.assertFalse(any(m["event"] == "complete" for m in self.messages))

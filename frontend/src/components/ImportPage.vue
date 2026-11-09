@@ -10,6 +10,7 @@ import { ZSwitch } from '@codex-proxy/ui/switch'
 import { ZTextarea } from '@codex-proxy/ui/textarea'
 import { api } from '../api'
 import { requestId } from '../utilities/requestId'
+import { parseImportCredentials } from '../utilities/importCredentials'
 import { displayTime, isActive, progress } from '../format'
 import type { ImportRequest, Job, Options } from '../types'
 import JobLogs from './JobLogs.vue'
@@ -20,17 +21,20 @@ const email = ref(''), password = ref(''), secret = ref(''), name = ref(''), wor
 const transport = ref<'http' | 'prefer_websocket'>('prefer_websocket'), enabled = ref(true), saveLogin = ref(true), notes = ref(''), groupIds = ref<string[]>([])
 const concurrency = ref(''), weight = ref('5'), mode = ref<'all' | 'allowlist' | 'denylist'>('all'), models = ref('')
 const submittedId = ref('')
+const batchMode = ref(false), batchText = ref(''), batchPrefix = ref('')
+const batchJobs = computed(() => batchPrefix.value ? props.jobs.filter(j => j.requestId.startsWith(batchPrefix.value)) : [])
+const batchSummary = computed(() => ({ total: batchJobs.value.length, success: batchJobs.value.filter(j => j.status === 'success').length, pending: batchJobs.value.filter(isActive).length }))
 const pending = computed(() => props.jobs.some(isActive))
-const imports = computed(() => [...props.jobs].filter(j => j.kind === 'import').reverse().slice(0, 10))
+const imports = computed(() => [...props.jobs].filter(j => j.kind === 'import').reverse().slice(0, 100))
 const proxyOptions = computed(() => [{ value: '', label: '直连（不使用代理）' }, ...options.value.proxies.map(p => ({ value: p.id, label: `${p.name} · ${p.endpoint}${p.enabled ? '' : '（已禁用）'}`, disabled: !p.enabled }))])
 const selectedProxy = computed(() => options.value.proxies.find(p => p.id === proxyId.value))
 const submittedJob = computed(() => props.jobs.find(j => j.requestId === submittedId.value))
 function selectGroup(id: string, checked: boolean) { groupIds.value = checked ? [...new Set([...groupIds.value, id])] : groupIds.value.filter(v => v !== id) }
 function pasteCredentials(event: ClipboardEvent) {
-  const text = event.clipboardData?.getData('text/plain') || ''
+  const text = (event.clipboardData?.getData('text/plain') || '').trim()
   if (!text.includes('----')) return
   event.preventDefault()
-  const parts = text.trim().split('----')
+  const parts = text.split('----')
   if (parts.length !== 3 || !/^[^\s@]+@[^\s@]+$/.test(parts[0].trim()) || !parts[1] || /[\r\n\u0000]/.test(text) || !/^[A-Z2-7]+=*$/i.test(parts[2].trim().replace(/ /g, ''))) {
     error.value = '粘贴格式无效，请使用 邮箱----密码----Base32 2FA 密钥，每次一个账号'
     return
@@ -51,18 +55,23 @@ async function submit() {
   error.value = ''; message.value = ''
   const limit = concurrency.value.trim() === '' ? null : Number(concurrency.value), w = Number(weight.value)
   const modelIds = mode.value === 'all' ? [] : [...new Set(models.value.split(/[\s,，]+/).filter(Boolean))].sort()
-  if (!email.value.trim() || !password.value || !secret.value.trim()) { error.value = '请填写邮箱、密码和 2FA 验证器密钥'; return }
+  if (!batchMode.value && (!email.value.trim() || !password.value || !secret.value.trim())) { error.value = '请填写邮箱、密码和 2FA 验证器密钥'; return }
+  let entries
+  try { entries = batchMode.value ? parseImportCredentials(batchText.value) : [{ email: email.value.trim(), password: password.value, totpSecret: secret.value }] }
+  catch (e) { error.value = (e as Error).message; return }
   if (limit !== null && (!Number.isSafeInteger(limit) || limit < 1 || limit > 4294967295) || !Number.isSafeInteger(w) || w < 1 || w > 100) { error.value = '并发限制留空或填写 1–4294967295 的整数，权重为 1–100'; return }
   if (mode.value !== 'all' && (!modelIds.length || modelIds.length > 256)) { error.value = '模型列表需包含 1–256 个精确模型 ID'; return }
   if (modelIds.some(s => s.startsWith('__') || s.includes('*') || new TextEncoder().encode(s).length > 256 || /[\u0000-\u001f\u007f]/.test(s))) { error.value = '模型 ID 不支持通配符、控制字符及保留前缀，最多 256 字节'; return }
   busy.value = true
   try {
     const id = requestId()
-    const body: ImportRequest = { requestId: id, email: email.value.trim(), password: password.value, totpSecret: secret.value, name: name.value.trim() || email.value.trim(), workspaceId: workspace.value.trim(), transport: transport.value, outboundProxyId: proxyId.value, loginProxyUrl: proxyId.value ? loginProxy.value.trim() : '', saveLoginNotes: saveLogin.value, settings: { notes: notes.value, enabled: enabled.value, concurrencyLimit: limit, weight: w, modelAccess: { mode: mode.value, models: modelIds }, groupIds: [...groupIds.value] } }
-    submittedId.value = `${id}:import`
-    await api.importAccount(body)
-    password.value = ''; secret.value = ''; loginProxy.value = ''
-    message.value = '导入任务已提交，可在下方查看进度'
+    const bodies: ImportRequest[] = entries.map(({ email, password, totpSecret }) => ({ requestId: batchMode.value ? requestId() : id, email, password, totpSecret, name: batchMode.value ? email : name.value.trim() || email, workspaceId: workspace.value.trim(), transport: transport.value, outboundProxyId: proxyId.value, loginProxyUrl: proxyId.value ? loginProxy.value.trim() : '', saveLoginNotes: saveLogin.value, settings: { notes: notes.value, enabled: enabled.value, concurrencyLimit: limit, weight: w, modelAccess: { mode: mode.value, models: modelIds }, groupIds: [...groupIds.value] } }))
+    if (new TextEncoder().encode(JSON.stringify({ requestId: id, accounts: bodies })).length > 131072) throw new Error('本批资料超过请求容量，请减少账号数量后提交')
+    submittedId.value = batchMode.value ? `${id}:import:0` : `${id}:import`
+    if (batchMode.value) { await api.importBatch(id, bodies); batchPrefix.value = `${id}:import:` }
+    else { await api.importAccount(bodies[0]); batchPrefix.value = '' }
+    password.value = ''; secret.value = ''; loginProxy.value = ''; batchText.value = ''
+    message.value = batchMode.value ? `${bodies.length} 个导入任务已排队，可在下方逐项查看进度` : '导入任务已提交，可在下方查看进度'
     emit('submitted')
     await api.tick()
     emit('submitted')
@@ -70,7 +79,11 @@ async function submit() {
   finally { busy.value = false }
 }
 onMounted(load)
-onUnmounted(() => { password.value = ''; secret.value = ''; loginProxy.value = '' })
+async function stopQueue() {
+  try { await api.cancel(); emit('submitted') }
+  catch (e) { error.value = (e as Error).message }
+}
+onUnmounted(() => { password.value = ''; secret.value = ''; loginProxy.value = ''; batchText.value = '' })
 </script>
 <template>
   <section class="settings-page" aria-label="账号导入">
@@ -83,14 +96,16 @@ onUnmounted(() => { password.value = ''; secret.value = ''; loginProxy.value = '
       <fieldset class="settings-fields" :disabled="busy || !ready || !props.enabled">
         <ZCard as="div" class="settings-card" title="登录资料" description="密码与 2FA 密钥只在内存中使用，提交成功或离开页面时清空">
           <div class="settings-fields">
-            <label class="field-label">粘贴登录资料<ZInput :model-value="''" type="password" autocomplete="new-password" placeholder="邮箱----密码----2FA 密钥" aria-label="粘贴登录资料" @paste.prevent="pasteCredentials" /><small>整行粘贴到此处或邮箱栏，自动填写下方登录资料，每次一个账号</small></label>
-            <div class="form-grid">
+            <ZCheckbox v-model="batchMode" label="批量导入（一行一个账号）" />
+            <label v-if="batchMode" class="field-label">批量登录资料<ZTextarea v-model="batchText" :rows="8" :maxlength="131072" autocomplete="off" spellcheck="false" placeholder="邮箱----密码----Base32 2FA 密钥，每行一个账号" aria-label="批量登录资料" /><small>每批最多 100 个账号，忽略空行和首尾空白，共用下方参数，账号名称使用各自邮箱，资料仅暂存内存</small></label>
+            <label v-else class="field-label">粘贴登录资料<ZInput :model-value="''" type="password" autocomplete="new-password" placeholder="邮箱----密码----2FA 密钥" aria-label="粘贴登录资料" @paste.prevent="pasteCredentials" /><small>整行粘贴到此处或邮箱栏，自动填写下方登录资料，多个账号请勾选批量导入</small></label>
+            <div v-if="!batchMode" class="form-grid">
               <label class="field-label">邮箱<ZInput v-model="email" type="email" autocomplete="off" aria-label="导入账号邮箱" @paste="pasteCredentials" /></label>
               <label class="field-label">账号名称<ZInput v-model="name" placeholder="留空使用邮箱" aria-label="导入账号名称" /></label>
               <label class="field-label">密码<ZInput v-model="password" type="password" autocomplete="new-password" aria-label="导入账号密码" /></label>
               <label class="field-label">2FA 密钥<ZInput v-model="secret" type="password" autocomplete="new-password" placeholder="Base32 验证器密钥，非六位动态码" aria-label="导入账号 2FA 密钥" /></label>
             </div>
-            <label class="field-label">工作区 ID（可选）<ZInput v-model="workspace" placeholder="个人账号可留空，多个工作区时需明确指定" aria-label="导入工作区 ID" /></label>
+            <label class="field-label">工作区 ID（可选）<ZInput v-model="workspace" placeholder="留空默认使用返回列表中的首个工作区" aria-label="导入工作区 ID" /><small>手动填写时优先使用指定工作区，默认不区分 Team 或个人套餐</small></label>
           </div>
         </ZCard>
         <ZCard as="div" class="settings-card" title="账号参数" description="与 CPR 官方 OAuth 编辑账号参数一致">
@@ -113,12 +128,14 @@ onUnmounted(() => { password.value = ''; secret.value = ''; loginProxy.value = '
             <ZCheckbox v-model="saveLogin" label="将登录资料保存到 CPR 账号备注，供后续自动重新授权使用" />
             <p v-if="saveLogin" class="muted">账号备注将保存为 邮箱----密码----2FA，仅在 CPR 中保存，备注最长 500 字</p>
             <label class="field-label" v-else>备注<ZTextarea v-model="notes" :rows="3" :maxlength="500" placeholder="最多 500 字" aria-label="导入账号备注" /></label>
-            <Notice tone="info">账号先以停用状态创建，传输方式和参数核对通过后按设置启用，需人工验证或存在多个未指定工作区时停止，结果不确定时请先在 CPR 中核对账号</Notice>
-            <div class="form-actions"><ZButton type="primary" :loading="busy" :disabled="pending || !ready || !props.enabled" @click="submit">登录并导入 CPR</ZButton><span v-if="submittedJob" role="status">{{ progress(submittedJob) }} · {{ submittedJob.message }}</span></div>
+            <Notice tone="info">账号按行串行处理，单号失败不阻止后续账号，结果不确定时不自动重试该号，未指定工作区默认选择首个，刷新页面后队列继续，插件重启后剩余资料失效</Notice>
+            <div class="form-actions"><ZButton type="primary" :loading="busy" :disabled="pending || !ready || !props.enabled" @click="submit">{{ batchMode ? '批量登录并导入 CPR' : '登录并导入 CPR' }}</ZButton><span v-if="submittedJob" role="status">{{ progress(submittedJob) }} · {{ submittedJob.message }}</span></div>
           </div>
         </ZCard>
       </fieldset>
     </form>
-    <ZCard v-if="imports.length" as="div" class="import-history" title="最近导入任务"><article v-for="j in imports" :key="j.requestId" class="import-result"><strong :class="{ danger: ['review', 'failed', 'interrupted'].includes(j.status), success: j.status === 'success' }">{{ progress(j) }}</strong><span>{{ j.message || '正在处理' }}</span><ZButton v-for="choice in j.workspaceChoices || []" :key="choice.id" size="small" :disabled="busy" @click="workspace = choice.id">使用工作区 {{ choice.id }}</ZButton><code v-if="j.accountId" class="mono">{{ j.accountId }}</code><time>{{ displayTime(j.finishedAt || j.startedAt) }}</time><JobLogs :job="j" /></article></ZCard>
+    <Notice v-if="batchSummary.total" tone="info">本批 {{ batchSummary.total }} 个，成功 {{ batchSummary.success }} 个，待处理 {{ batchSummary.pending }} 个，其他结果 {{ batchSummary.total - batchSummary.success - batchSummary.pending }} 个</Notice>
+    <div v-if="pending"><ZButton :disabled="busy" @click="stopQueue">停止导入及当前队列</ZButton></div>
+    <ZCard v-if="imports.length" as="div" class="import-history" title="最近导入任务"><article v-for="j in imports" :key="j.requestId" class="import-result"><span v-if="j.label">{{ j.label }}</span><strong :class="{ danger: ['review', 'failed', 'interrupted'].includes(j.status), success: j.status === 'success' }">{{ progress(j) }}</strong><span>{{ j.message || '正在处理' }}</span><ZButton v-for="choice in j.workspaceChoices || []" :key="choice.id" size="small" :disabled="busy" @click="workspace = choice.id">使用工作区 {{ choice.id }}</ZButton><code v-if="j.accountId" class="mono">{{ j.accountId }}</code><time>{{ displayTime(j.finishedAt || j.startedAt) }}</time><JobLogs :job="j" /></article></ZCard>
   </section>
 </template>

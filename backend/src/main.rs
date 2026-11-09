@@ -45,6 +45,8 @@ struct Job {
     automatic: bool,
     #[serde(default)]
     logs: Vec<diagnostics::LogEntry>,
+    #[serde(default)]
+    label: String,
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct WorkspaceChoice {
@@ -66,6 +68,7 @@ impl Job {
             kind: "reauth".into(),
             automatic,
             logs: vec![diagnostics::lifecycle("任务已排队")],
+            label: String::new(),
         }
     }
     fn active(&self) -> bool {
@@ -153,6 +156,7 @@ struct Manager {
     runtime: worker::Runtime,
     worker: Option<worker::Worker>,
     recovered: bool,
+    imports: std::collections::BTreeMap<String, importing::Import>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -228,6 +232,7 @@ fn registration() -> ManagementRegistration {
             ("GET", "api/jobs"),
             ("GET", "api/options"),
             ("POST", "api/import"),
+            ("POST", "api/import-batch"),
             ("POST", "api/config"),
             ("POST", "api/submit"),
             ("POST", "api/logout"),
@@ -286,10 +291,15 @@ fn settings(a: &Value) -> Value {
     json!({"id":a["id"],"email":a["email"],"name":a["name"],"enabled":a["enabled"],"notes":a["notes"],"groups":a["groups"],"proxy":a["outboundProxyEndpoint"],"proxyBinding":a["_proxyBinding"],"weight":a["weight"],"concurrencyLimit":a["concurrencyLimit"],"modelAccess":a["modelAccess"],"accountId":a["accountId"],"userId":a["userId"],"planType":a["planType"]})
 }
 fn require_idle(a: &Value) -> Result<(), PluginFault> {
-    if a["capacity"]["usedSlots"].as_u64() != Some(0) {
-        return Err(fault("账号仍有在途请求或并发状态未知，请空闲后重试"));
+    match a["capacity"]["usedSlots"].as_u64() {
+        Some(0) => Ok(()),
+        Some(used) => Err(fault(&format!(
+            "账号当前有 {used} 个在途请求，已停止操作，请空闲后重试"
+        ))),
+        None => Err(fault(
+            "无法读取账号实时并发状态，已停止操作，请检查宿主运行状态后重试",
+        )),
     }
-    Ok(())
 }
 async fn detail(host: &HostClient, id: &str) -> Result<Value, PluginFault> {
     let data = admin(
@@ -437,6 +447,8 @@ impl Manager {
     async fn tick(&mut self, host: &HostClient) -> Result<(), PluginFault> {
         self.recover(host).await?;
         let (mut queue, version) = host::load(host).await?;
+        self.imports
+            .retain(|id, _| queue.jobs.iter().any(|j| j.request_id == *id && j.active()));
         if !queue.enabled {
             return Ok(());
         }
@@ -623,7 +635,11 @@ impl Manager {
             job.status = "running".into();
             job.step = "preparing".into();
             job.started_at = Some(now());
-            job.log("开始核对账号、代理、凭据版本及空闲状态");
+            job.log(if job.kind == "import" {
+                "开始核对导入资料、分组、代理及账号重复状态"
+            } else {
+                "开始核对账号、代理、凭据版本及空闲状态"
+            });
             if job.kind == "logout" {
                 queue
                     .auto_attempts
@@ -634,6 +650,10 @@ impl Manager {
             let result=async {
                 self.runtime.prepare().await?;
                 let job=&queue.jobs[position];
+                if job.kind == "import" {
+                    let request = self.imports.remove(&job.request_id).ok_or_else(|| fault("批量导入资料已失效，请重新提交"))?;
+                    return importing::start(&mut self.runtime, host, request, job.request_id.clone()).await;
+                }
                 if job.kind == "logout" { return logout::start(&mut self.runtime, host, job).await }
                 let a=detail(host,&job.account_id).await?;
                 require_idle(&a)?;
@@ -669,7 +689,9 @@ async fn handle(
     manager.recover(&call.host).await?;
     if !call.request.query.is_empty()
         || call.payload.len()
-            > if ["api/import", "api/config"].contains(&call.request.path.as_str()) {
+            > if ["api/import", "api/import-batch", "api/config"]
+                .contains(&call.request.path.as_str())
+            {
                 131072
             } else {
                 16384
@@ -733,6 +755,7 @@ async fn handle(
         host::save(&call.host, &queue, version).await?;
         if !queue.enabled {
             manager.worker.take();
+            manager.imports.clear();
         }
         return Ok(json!({"enabled":queue.enabled,"automation":queue.automation}));
     }
@@ -740,6 +763,10 @@ async fn handle(
     match call.request.path.as_str() {
         "api/import" => {
             return importing::submit(manager, &call.host, &call.payload, queue, version).await;
+        }
+        "api/import-batch" => {
+            return importing::submit_batch(manager, &call.host, &call.payload, queue, version)
+                .await;
         }
         "api/submit" | "api/logout" => {
             let logging_out = call.request.path == "api/logout";
@@ -835,6 +862,7 @@ async fn handle(
                     kind: kind.into(),
                     automatic: false,
                     logs: vec![diagnostics::lifecycle("任务已排队")],
+                    label: String::new(),
                 });
             }
         }
@@ -905,6 +933,7 @@ async fn handle(
                 kind: "reauth".into(),
                 automatic: false,
                 logs: vec![diagnostics::lifecycle("任务已排队")],
+                label: String::new(),
             });
         }
         "api/free-fallback" => {
@@ -960,6 +989,7 @@ async fn handle(
                 kind: "reauth".into(),
                 automatic: false,
                 logs: vec![diagnostics::lifecycle("任务已排队")],
+                label: String::new(),
             });
         }
         "api/cancel" => {
@@ -973,6 +1003,7 @@ async fn handle(
                         .is_none_or(|id| id == &job.request_id)
                 {
                     job.finish("cancelled", "已取消，不会重新提交授权回调");
+                    manager.imports.remove(&job.request_id);
                     if manager
                         .worker
                         .as_ref()
@@ -1006,6 +1037,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         runtime: worker::Runtime::new(),
         worker: None,
         recovered: false,
+        imports: Default::default(),
     }));
     let background = Arc::clone(&manager);
     let shutdown = Arc::clone(&manager);
@@ -1051,6 +1083,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn idle_check_distinguishes_active_requests_from_unknown_capacity() {
+        assert!(require_idle(&json!({"capacity":{"usedSlots":0}})).is_ok());
+        for used in [1, 20, u64::MAX] {
+            let error = require_idle(&json!({"capacity":{"usedSlots":used}})).unwrap_err();
+            assert!(error.message.contains(&format!("{used} 个在途请求")));
+            assert!(!error.message.contains("无法读取"));
+        }
+        for account in [
+            json!({}),
+            json!({"capacity":null}),
+            json!({"capacity":{}}),
+            json!({"capacity":{"usedSlots":null}}),
+            json!({"capacity":{"usedSlots":"0"}}),
+            json!({"capacity":{"usedSlots":-1}}),
+            json!({"capacity":{"usedSlots":false}}),
+        ] {
+            let error = require_idle(&account).unwrap_err();
+            assert!(error.message.contains("无法读取账号实时并发状态"));
+        }
+    }
 
     #[test]
     fn detailed_history_stays_within_management_response_budget() {

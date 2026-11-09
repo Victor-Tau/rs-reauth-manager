@@ -17,11 +17,13 @@ export function installPreview() {
     if (input.path === 'api/accounts') return encode({ accounts })
     if (input.path === 'api/jobs') return encode({ jobs, enabled, automation })
     if (input.path === 'api/options') return encode({ groups: [{ id: 'preview-primary', name: '示例部署组' }, { id: 'preview-shared', name: '跨区域共享账号组' }], proxies: [{ id: 'preview-proxy', name: '示例代理', endpoint: 'http://127.0.0.1:21001', enabled: true, hasAuthentication: false }] })
-    if (input.path === 'api/import') {
+    if (input.path === 'api/import' || input.path === 'api/import-batch') {
       if (!enabled) throw new Error('插件已关闭，请先打开插件开关')
-      const id = `acct_preview_import_${accounts.length}`
-      accounts.push({ id, name: body.name, email: body.email, enabled: body.settings.enabled, planType: 'free', status: 'normal', accessTokenExpiresAt: null, proxy: body.outboundProxyId ? 'http://127.0.0.1:21001' : null, notesValid: body.saveLoginNotes, groups: body.settings.groupIds.map((id: string) => ({ id, name: id === 'preview-primary' ? '示例部署组' : '跨区域共享账号组' })) })
-      jobs.push({ requestId: `${body.requestId}:import`, accountId: id, kind: 'import', status: 'success', step: 'success', message: '模拟导入成功，未访问真实账号', startedAt: Date.now(), finishedAt: Date.now() })
+      for (const [index, entry] of (input.path === 'api/import-batch' ? body.accounts : [body]).entries()) {
+        const id = `acct_preview_import_${accounts.length}`
+        accounts.push({ id, name: entry.name, email: entry.email, enabled: entry.settings.enabled, planType: 'free', status: 'normal', accessTokenExpiresAt: null, proxy: entry.outboundProxyId ? 'http://127.0.0.1:21001' : null, notesValid: entry.saveLoginNotes, groups: entry.settings.groupIds.map((id: string) => ({ id, name: id === 'preview-primary' ? '示例部署组' : '跨区域共享账号组' })) })
+        jobs.push({ requestId: input.path === 'api/import-batch' ? `${body.requestId}:import:${index}` : `${body.requestId}:import`, label: entry.email, accountId: id, kind: 'import', status: 'success', step: 'success', message: '模拟导入成功，未访问真实账号', startedAt: Date.now(), finishedAt: Date.now() })
+      }
       return encode({ jobs })
     }
     if (input.path === 'api/config') {

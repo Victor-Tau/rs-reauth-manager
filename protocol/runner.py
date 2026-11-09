@@ -149,22 +149,21 @@ def run(data):
             selected = self.selected_workspace
             session = self._decode_oauth_session_cookie() or {}
             workspaces = session.get("workspaces") or []
-            ids = set()
-            if isinstance(session.get("workspace_id"), str) and session["workspace_id"]:
-                ids.add(self._remember_workspace(session["workspace_id"]))
+            ids = []
             if isinstance(workspaces, list):
                 for item in workspaces:
-                    if isinstance(item, dict) and isinstance(item.get("id"), str) and item["id"]:
-                        ids.add(self._remember_workspace(item["id"]))
+                    if isinstance(item, dict) and isinstance(item.get("id"), str) and re.fullmatch(r'[A-Za-z0-9_-]{1,128}', item["id"]) and item["id"] not in ids:
+                        ids.append(self._remember_workspace(item["id"]))
+            if isinstance(session.get("workspace_id"), str) and re.fullmatch(r'[A-Za-z0-9_-]{1,128}', session["workspace_id"]) and session["workspace_id"] not in ids:
+                ids.append(self._remember_workspace(session["workspace_id"]))
             self.trace('workspace_candidates', stage='workspace', source='session', count=len(ids))
             if not selected:
                 if importing:
-                    if len(ids) == 1:
-                        self.selected_workspace = next(iter(ids))
+                    if ids:
+                        # Keep upstream list order; a current workspace is only a fallback.
+                        self.selected_workspace = ids[0]
                         return self.selected_workspace
-                    if not ids:
-                        return ""
-                    raise ValueError("workspace")
+                    return ""
                 if self.unbound_workspace:
                     return ""
                 raise ValueError("workspace")
@@ -180,14 +179,14 @@ def run(data):
 
         def _extract_workspace_id_from_html(self, html_text):
             text = str(html_text)
-            ids = workspace_ids(text)
+            ids = workspace_ids(text, prefer_list=importing and not self.selected_workspace)
             self.trace('workspace_candidates', stage='workspace', source='page', count=len(ids))
             for value in ids:
                 self._remember_workspace(value)
             if self.selected_workspace and self.selected_workspace in text:
                 return self._remember_workspace(self.selected_workspace)
             if importing and not self.selected_workspace:
-                if len(ids) == 1:
+                if ids:
                     self.selected_workspace = ids[0]
                     return ids[0]
                 if not ids:

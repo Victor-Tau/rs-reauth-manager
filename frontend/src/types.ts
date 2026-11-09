@@ -1,6 +1,6 @@
 export interface AccountGroup { id: string; name: string }
 export interface Account { id: string; name: string; email: string | null; enabled: boolean; planType: string | null; status: string; accessTokenExpiresAt: string | null; proxy: string | null; notesValid: boolean; groups: AccountGroup[] }
-export interface Job { kind?: string; automatic?: boolean; requestId: string; accountId: string; status: string; step: string; message: string; startedAt: number | null; finishedAt: number | null; workspaceChoices?: { id: string }[]; forceWorkspaceId?: string | null; logs?: { at: number; message: string }[] }
+export interface Job { kind?: string; label?: string; automatic?: boolean; requestId: string; accountId: string; status: string; step: string; message: string; startedAt: number | null; finishedAt: number | null; workspaceChoices?: { id: string }[]; forceWorkspaceId?: string | null; logs?: { at: number; message: string }[] }
 export interface Bridge { readonly version: 2; readonly theme: 'light' | 'dark'; request(input: { method: 'GET' | 'POST'; path: string; contentType?: string; body?: string }): Promise<{ status: number; contentType: string; body: ArrayBuffer }> }
 declare global { interface Window { codexProxyPlugin?: Bridge } }
 

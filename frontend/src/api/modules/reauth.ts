@@ -6,6 +6,7 @@ export const api = {
   setConfig: (enabled: boolean, automation?: AutomationConfig) => request('POST', 'api/config', { enabled, ...(automation ? { automation } : {}) }).then(parseConfig),
   options: () => request('GET', 'api/options').then(parseOptions),
   importAccount: (input: ImportRequest) => request('POST', 'api/import', input).then(parseJobs),
+  importBatch: (requestId: string, accounts: ImportRequest[]) => request('POST', 'api/import-batch', { requestId, accounts }).then(parseJobs),
   accounts: () => request('GET', 'api/accounts').then(parseAccounts),
   jobs: () => request('GET', 'api/jobs').then(parseJobs),
   submit: (accountIds: string[], requestId: string) => request('POST', 'api/submit', { accountIds, requestId }).then(parseJobs),

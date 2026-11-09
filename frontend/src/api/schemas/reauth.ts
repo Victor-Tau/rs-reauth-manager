@@ -18,6 +18,7 @@ function account(value: unknown): value is Account {
 function job(value: unknown): value is Job {
   return isRecord(value) && typeof value.requestId === 'string' && typeof value.accountId === 'string'
     && typeof value.message === 'string' && typeof value.step === 'string'
+    && (value.label === undefined || typeof value.label === 'string' && value.label.length <= 254)
     && typeof value.status === 'string' && ['queued', 'running', 'success', 'failed', 'review', 'interrupted', 'cancelled'].includes(value.status)
     && nullableTime(value.startedAt) && nullableTime(value.finishedAt)
     && (value.kind === undefined || typeof value.kind === 'string' && ['', 'reauth', 'import', 'logout'].includes(value.kind))

@@ -2,7 +2,7 @@
 use crate::{
     Job, Manager, Queue,
     host::{admin, fault, now, query},
-    worker::Worker,
+    worker::{Runtime, Worker},
 };
 use gateway_plugin_sdk::{PluginFault, client::HostClient};
 use serde::{Deserialize, Serialize};
@@ -94,7 +94,7 @@ impl Settings {
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Import {
+pub(crate) struct Import {
     request_id: String,
     email: String,
     password: String,
@@ -239,26 +239,10 @@ async fn resolve_proxy(
         json!({"id":p["id"],"revision":p["revision"],"endpoint":p["endpoint"]}),
     ))
 }
-pub async fn submit(
-    manager: &mut Manager,
+async fn check_request(
     host: &HostClient,
-    payload: &[u8],
-    mut queue: Queue,
-    version: Option<u64>,
-) -> Result<Value, PluginFault> {
-    if !queue.enabled {
-        return Err(fault("插件已关闭，请先打开插件开关"));
-    }
-    let mut request: Import =
-        serde_json::from_slice(payload).map_err(|_| fault("导入请求格式无效"))?;
-    let notes = validate(&mut request)?;
-    let id = format!("{}:import", request.request_id);
-    if queue.jobs.iter().any(|j| j.request_id == id) {
-        return Ok(json!({"jobs":queue.jobs}));
-    }
-    if manager.worker.is_some() || queue.jobs.iter().any(Job::active) {
-        return Err(fault("请等待当前授权队列结束后导入账号"));
-    }
+    request: &Import,
+) -> Result<(String, Value), PluginFault> {
     let accounts = crate::rows(host).await?;
     if accounts["accounts"]
         .as_array()
@@ -284,10 +268,65 @@ pub async fn submit(
     }) {
         return Err(fault("导入分组已不存在，请刷新选项"));
     }
-    let (proxy, proxy_snapshot) = resolve_proxy(host, &request).await?;
+    resolve_proxy(host, request).await
+}
+
+async fn launch(
+    runtime: &mut Runtime,
+    host: &HostClient,
+    mut request: Import,
+    id: String,
+    proxy: (String, Value),
+) -> Result<Worker, PluginFault> {
+    let notes = validate(&mut request)?;
+    let (proxy, proxy_snapshot) = proxy;
+    let start = admin(host, "POST", "/api/admin/accounts/oauth/start", Some(json!({"provider":"openai","name":request.name,"outboundProxyId":request.outbound_proxy_id}))).await?;
+    let flow = start["flowId"]
+        .as_str()
+        .ok_or_else(|| fault("CPR 授权流程无效"))?
+        .to_owned();
+    let input = json!({"mode":"import","notes":notes,"email":request.email,"proxy":proxy,"authorizationUrl":start["authorizationUrl"],"accountId":request.workspace_id});
+    let snapshot = json!({"email":request.email,"settings":request.settings,"transport":request.transport,"proxy":proxy_snapshot});
+    runtime.start(input, flow, snapshot, id).await
+}
+
+pub async fn start(
+    runtime: &mut Runtime,
+    host: &HostClient,
+    mut request: Import,
+    id: String,
+) -> Result<Worker, PluginFault> {
+    validate(&mut request)?;
+    let proxy = check_request(host, &request).await?;
+    runtime.prepare().await?;
+    launch(runtime, host, request, id, proxy).await
+}
+
+pub async fn submit(
+    manager: &mut Manager,
+    host: &HostClient,
+    payload: &[u8],
+    mut queue: Queue,
+    version: Option<u64>,
+) -> Result<Value, PluginFault> {
+    if !queue.enabled {
+        return Err(fault("插件已关闭，请先打开插件开关"));
+    }
+    let mut request: Import =
+        serde_json::from_slice(payload).map_err(|_| fault("导入请求格式无效"))?;
+    validate(&mut request)?;
+    let id = format!("{}:import", request.request_id);
+    if queue.jobs.iter().any(|j| j.request_id == id) {
+        return Ok(json!({"jobs":queue.jobs}));
+    }
+    if manager.worker.is_some() || queue.jobs.iter().any(Job::active) {
+        return Err(fault("请等待当前授权队列结束后导入账号"));
+    }
+    let proxy = check_request(host, &request).await?;
     manager.runtime.prepare().await?;
     let mut job = Job::queued(id.clone(), String::new(), false);
     job.kind = "import".into();
+    job.label = request.email.clone();
     job.status = "running".into();
     job.step = "preparing".into();
     job.started_at = Some(now());
@@ -295,13 +334,7 @@ pub async fn submit(
     queue.jobs.push(job);
     crate::trim_jobs(&mut queue);
     crate::host::save(host, &queue, version).await?;
-    let result = async {
-        let start = admin(host, "POST", "/api/admin/accounts/oauth/start", Some(json!({"provider":"openai","name":request.name,"outboundProxyId":request.outbound_proxy_id}))).await?;
-        let flow = start["flowId"].as_str().ok_or_else(|| fault("CPR 授权流程无效"))?.to_owned();
-        let input = json!({"mode":"import","notes":notes,"email":request.email,"proxy":proxy,"authorizationUrl":start["authorizationUrl"],"accountId":request.workspace_id});
-        let snapshot = json!({"email":request.email,"settings":request.settings,"transport":request.transport,"proxy":proxy_snapshot});
-        manager.runtime.start(input, flow, snapshot, id.clone()).await
-    }.await;
+    let result = launch(&mut manager.runtime, host, request, id.clone(), proxy).await;
     if let Ok(worker) = result {
         manager.worker = Some(worker)
     } else {
@@ -314,10 +347,106 @@ pub async fn submit(
     }
     Ok(json!({"jobs":crate::host::load(host).await?.0.jobs}))
 }
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Batch {
+    request_id: String,
+    accounts: Vec<Import>,
+}
+
+pub async fn submit_batch(
+    manager: &mut Manager,
+    host: &HostClient,
+    payload: &[u8],
+    mut queue: Queue,
+    version: Option<u64>,
+) -> Result<Value, PluginFault> {
+    if !queue.enabled {
+        return Err(fault("插件已关闭，请先打开插件开关"));
+    }
+    let mut batch: Batch =
+        serde_json::from_slice(payload).map_err(|_| fault("批量导入格式无效"))?;
+    if uuid::Uuid::parse_str(&batch.request_id).is_err()
+        || batch.accounts.is_empty()
+        || batch.accounts.len() > 100
+    {
+        return Err(fault("每批需包含 1–100 个账号及有效任务标识"));
+    }
+    let mut emails = std::collections::BTreeSet::new();
+    for (index, request) in batch.accounts.iter_mut().enumerate() {
+        validate(request).map_err(|_| {
+            fault(&format!(
+                "第 {} 行导入资料或设置无效，请核对后整批提交",
+                index + 1
+            ))
+        })?;
+        if !emails.insert(request.email.to_lowercase()) {
+            return Err(fault(&format!(
+                "第 {} 行邮箱重复，尚未提交任何账号",
+                index + 1
+            )));
+        }
+    }
+    let prefix = format!("{}:import:", batch.request_id);
+    let existing: Vec<_> = queue
+        .jobs
+        .iter()
+        .filter(|j| j.request_id.starts_with(&prefix))
+        .collect();
+    if !existing.is_empty() {
+        if existing.len() != batch.accounts.len()
+            || existing
+                .iter()
+                .zip(&batch.accounts)
+                .any(|(j, r)| j.kind != "import" || j.label != r.email)
+        {
+            return Err(fault("任务标识已被其他批次使用"));
+        }
+        return Ok(json!({"jobs":queue.jobs}));
+    }
+    if manager.worker.is_some() || queue.jobs.iter().any(Job::active) {
+        return Err(fault("请等待当前授权队列结束后导入账号"));
+    }
+    let accounts = crate::rows(host).await?;
+    for (index, request) in batch.accounts.iter().enumerate() {
+        if accounts["accounts"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|a| {
+                a["email"]
+                    .as_str()
+                    .is_some_and(|v| v.eq_ignore_ascii_case(&request.email))
+            })
+        {
+            return Err(fault(&format!(
+                "第 {} 行邮箱已有 OAuth 账号，请使用重新授权，尚未提交任何账号",
+                index + 1
+            )));
+        }
+    }
+    for (index, request) in batch.accounts.iter().enumerate() {
+        let mut job = Job::queued(format!("{prefix}{index}"), String::new(), false);
+        job.kind = "import".into();
+        job.label = request.email.clone();
+        queue.jobs.push(job);
+    }
+    crate::trim_jobs(&mut queue);
+    // 仅持久化任务元数据，取消或进程重启后丢弃排队登录资料
+    crate::host::save(host, &queue, version).await?;
+    for (index, request) in batch.accounts.into_iter().enumerate() {
+        manager.imports.insert(format!("{prefix}{index}"), request);
+    }
+    Ok(json!({"jobs":queue.jobs}))
+}
 pub async fn finish(host: &HostClient, job: &mut Job, current: &Worker, output: &Value) {
     if output["event"] != "complete" {
         if output["code"] == "workspace" {
-            job.finish("failed", "工作区无法唯一确定，请指定工作区 ID 后重新导入");
+            job.finish(
+                "failed",
+                "工作区选择或授权校验失败，请核对后指定工作区 ID 重新导入",
+            );
             job.step = "workspace".into();
             job.workspace_choices = crate::workspace_choices(output);
             return;

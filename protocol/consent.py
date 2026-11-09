@@ -4,13 +4,17 @@ import json
 import re
 
 
-def workspace_ids(text):
+def workspace_ids(text, prefer_list=False):
     text = html.unescape(str(text or ""))[:2_000_000]
     ids = []
+    listed_ids = []
 
-    def remember(value):
-        if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", value) and value not in ids:
-            ids.append(value)
+    def remember(value, listed=False):
+        if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", value):
+            if value not in ids:
+                ids.append(value)
+            if listed and value not in listed_ids:
+                listed_ids.append(value)
 
     def inspect(value, pool=None, depth=0):
         if depth > 20:
@@ -34,7 +38,7 @@ def workspace_ids(text):
                                         index = int(field[1:])
                                         field = pool[index] if index < len(pool) else ""
                                     if field == "id":
-                                        remember(pool[item] if pool is not None and type(item) is int and 0 <= item < len(pool) else item)
+                                        remember(pool[item] if pool is not None and type(item) is int and 0 <= item < len(pool) else item, listed=True)
                 inspect(child, pool, depth + 1)
         elif isinstance(value, list):
             for child in value[:10000]:
@@ -63,6 +67,8 @@ def workspace_ids(text):
     # Older streamed pages contain a string table rather than indexed objects
     for section in re.findall(r'"workspaces"(.{0,1600}?)(?:</script>|$)', decoded, re.I | re.S):
         for value in re.findall(r'"id"\s*,\s*"([0-9a-fA-F-]{36})"', section):
-            remember(value)
+            remember(value, listed=True)
+    if prefer_list:
+        ids = listed_ids + [value for value in ids if value not in listed_ids]
     return ids[:31]
 

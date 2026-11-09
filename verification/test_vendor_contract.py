@@ -16,25 +16,28 @@ from vendor.lib import chatgpt_client, oauth_client
 
 
 class OfflineSession:
-    def __init__(self, requests, state, workspace, consent_page=False):
+    def __init__(self, requests, state, workspace, consent_page=False, expected_workspace="personal-workspace"):
         self.headers = {}
         self.cookies = RequestsCookieJar()
         if workspace is not None:
-            self.cookies.set("oai-client-auth-session", json.dumps({"workspace_id": workspace}), domain="auth.openai.com")
+            self.cookies.set("oai-client-auth-session", json.dumps(workspace if isinstance(workspace, dict) else {"workspace_id": workspace}), domain="auth.openai.com")
         self.requests = requests
         self.state = state
         self.consent_page = consent_page
+        self.expected_workspace = expected_workspace
 
     def request(self, method, url, **kwargs):
         callback = f"http://127.0.0.1:1455/auth/callback?state={self.state}&code=fixture-code"
         consent_url = "https://auth.openai.com/sign-in-with-chatgpt/codex/consent"
-        if method == "POST" and self.consent_page == "hydration" and url.endswith('/api/accounts/workspace/select'):
-            assert kwargs['json'] == {'workspace_id':'personal-workspace'}
+        if method == "POST" and (self.consent_page == "hydration" or isinstance(self.consent_page, dict)) and url.endswith('/api/accounts/workspace/select'):
+            assert kwargs['json'] == {'workspace_id': self.expected_workspace}
             self.requests.append((method, url))
             return types.SimpleNamespace(status_code=302, url=url, headers={'Location':callback}, text='')
         if method != "GET" or url != URL:
             raise AssertionError("Unexpected offline transport request")
         self.requests.append((method, url))
+        if isinstance(self.consent_page, dict):
+            return types.SimpleNamespace(status_code=200, url=consent_url, headers={'Content-Type':'text/html'}, text='<script>' + json.dumps(self.consent_page) + '</script>')
         if self.consent_page == 'hydration':
             payload = '[{"_1":2},"workspaces",[3],{"_4":5},"id","personal-workspace"]'
             return types.SimpleNamespace(status_code=200, url=consent_url, headers={'Content-Type':'text/html'}, text='<script>window.__reactRouterContext.streamController.enqueue(' + json.dumps(payload) + ');</script>')
@@ -81,15 +84,15 @@ class VendorContractTests(unittest.TestCase):
         self.assertEqual(messages[-1]['code'], 'limited')
         self.assertEqual(messages[-1]['diagnostic'], {'stage':'mfa_verify', 'reason':'rate_limited', 'httpStatus':429})
 
-    def execute(self, url, state="fixture", workspace="original-workspace", importing=False, consent_page=False, proxy="http://fixture:pass@127.0.0.1:21001"):
+    def execute(self, url, state="fixture", workspace="original-workspace", importing=False, consent_page=False, proxy="http://fixture:pass@127.0.0.1:21001", workspace_id="", expected_workspace="personal-workspace"):
         self.messages, self.requests = [], []
         data = {"notes": f"{EMAIL}----fixture-password----{SECRET}", "email": EMAIL, "proxy": proxy, "authorizationUrl": url, "accountId": "original-workspace"}
         if importing:
-            data.update(mode="import", accountId="")
+            data.update(mode="import", accountId=workspace_id)
 
         def session(**kwargs):
             self.assertEqual(kwargs["proxy"] or None, data["proxy"] or None)
-            return OfflineSession(self.requests, state, workspace, consent_page)
+            return OfflineSession(self.requests, state, workspace, consent_page, expected_workspace)
 
         with patch.object(chatgpt_client, "create_http_session", side_effect=session), patch.object(oauth_client, "create_http_session", side_effect=session), patch.object(socket, "create_connection", side_effect=AssertionError("Network forbidden")), patch.object(runner, "emit", side_effect=lambda event, **fields: self.messages.append({"event": event, **fields})):
             runner.run(data)
@@ -140,6 +143,31 @@ class VendorContractTests(unittest.TestCase):
         self.execute(desktop_url(), workspace=None, importing=True, consent_page='hydration')
         self.assertEqual(self.requests[-1], ('POST', 'https://auth.openai.com/api/accounts/workspace/select'))
         self.assertEqual(self.messages[-1]['event'], 'complete')
+
+    def test_import_multiple_workspaces_post_first_candidate_with_real_upstream(self):
+        page = {"workspace_id": "a-personal", "workspaces": [{"id": "z-team"}, {"id": "a-personal"}]}
+        for cookie in [None, {"workspace_id": "a-personal", **page}]:
+            with self.subTest(cookie=cookie):
+                self.execute(desktop_url(), workspace=cookie, importing=True, consent_page=page, expected_workspace="z-team")
+                self.assertEqual(self.requests, [('GET', URL), ('POST', 'https://auth.openai.com/api/accounts/workspace/select')])
+                self.assertEqual(self.messages[-1]['event'], 'complete')
+
+    def test_import_explicit_workspace_posts_requested_candidate_with_real_upstream(self):
+        page = {"workspaces": [{"id": "z-team"}, {"id": "a-personal"}]}
+        self.execute(desktop_url(), workspace=None, importing=True, consent_page=page, workspace_id="a-personal", expected_workspace="a-personal")
+        self.assertEqual(self.requests[-1], ('POST', 'https://auth.openai.com/api/accounts/workspace/select'))
+        self.assertEqual(self.messages[-1]['event'], 'complete')
+
+    def test_import_missing_explicit_workspace_does_not_default_to_first(self):
+        page = {"workspaces": [{"id": "z-team"}, {"id": "a-personal"}]}
+        self.execute(desktop_url(), workspace=None, importing=True, consent_page=page, workspace_id="missing-workspace")
+        self.assertEqual(self.requests, [('GET', URL)])
+        self.assertFalse(any(message['event'] == 'complete' for message in self.messages))
+
+    def test_import_default_workspace_real_upstream_rejects_wrong_state(self):
+        page = {"workspaces": [{"id": "z-team"}, {"id": "a-personal"}]}
+        self.execute(desktop_url(), state="wrong", workspace=None, importing=True, consent_page=page, expected_workspace="z-team")
+        self.assertFalse(any(message['event'] == 'complete' for message in self.messages))
 
     def test_unknown_consent_page_reports_page_features_without_raw_body(self):
         self.execute(desktop_url(), workspace=None, importing=True, consent_page='empty')
