@@ -1,3 +1,19 @@
+# 账号重新授权 v0.13.13
+
+适配 [Codex Proxy RS 3.44.0](https://github.com/zyycn/codex-proxy-rs/releases/tag/v3.44.0)，使用固定提交 `c622f085748f812936a7371fcc85d1621fa72ca8` 的公开插件 SDK 与 `cpr-plugin` 重新编译、打包。
+
+- 宿主兼容范围为 `>=3.44.0, <3.45.0`；CPR 3.43.x 请继续使用 v0.13.12。
+- 已核对 SDK、运行时、打包器及所用账号、OAuth、代理、分组和浏览器桥接口。新增代理目录与按代理 ID 请求能力未被本插件使用，RPC v7、管理能力 v2、维护能力 v1 和浏览器桥 v2 保持兼容。
+- 宿主原生 OAuth 重新授权使用新授权元数据、保留账号名称并清理旧额度访问状态；插件继续校验账号配置及写回结果，新授权缺少刷新令牌时显示需要核对。
+- 保留直连账号支持、绑定代理校验、账号导入、退出所有登录及写回保护，升级不会自动重新授权账号。
+- Linux x86_64，使用 `cargo zigbuild --target x86_64-unknown-linux-gnu.2.28` 构建，要求 glibc 2.28+；官方 UI 仍使用 0.9.0。
+- 构建及验证绑定同一个 CPU 核心，Cargo 单任务执行。
+- 验证通过：前端生产构建、18 个宿主桥场景、25 个批量操作场景、581 项源码约定检查、桌面与手机浏览器验证、Rust fmt/Clippy、14 项 Rust 测试、74 个模拟宿主协议场景和 76 项 Python 离线测试。
+- 安装包已通过 7 个文件摘要校验、RPC v7 握手、内置 Python 自检、私有运行目录复用与退出清理检查；最高 glibc 依赖为 `GLIBC_2.28`。
+- 使用模拟宿主及离线数据验证，尚未完成 CPR 3.44.0 实际安装与真实账号完整链路验收。
+
+下载 `.tar.gz` 和 `.tar.gz.sha256`，核对摘要后在 CPR 插件管理中安装；也可使用 GitHub 来源 `Victor-Tau/rs-reauth-manager`、标签 `v0.13.13`，选择插件 `.tar.gz` 附件。
+
 # 账号重新授权 v0.13.12
 
 适配 [Codex Proxy RS 3.43.0](https://github.com/zyycn/codex-proxy-rs/releases/tag/v3.43.0)，使用固定提交 `402bc37fbb5c83378cc83cec89e9fa251e4a99c1` 的公开插件 SDK 与 `cpr-plugin` 重新编译、打包。
