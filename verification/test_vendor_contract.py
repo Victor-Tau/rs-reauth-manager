@@ -52,6 +52,107 @@ class OfflineSession:
 
 
 class VendorContractTests(unittest.TestCase):
+    def phone_flow(self, *, continuation='callback', mfa=True, state='fixture', workspace=None, workspace_id=''):
+        messages, requests, sessions = [], [], []
+        data = {'mode': 'import', 'notes': f'{EMAIL}----fixture-password----{SECRET}', 'email': EMAIL, 'proxy': '', 'authorizationUrl': desktop_url(), 'accountId': workspace_id}
+
+        class Session:
+            def __init__(self):
+                self.cookies = RequestsCookieJar()
+                if workspace is not None:
+                    self.cookies.set('oai-client-auth-session', json.dumps({'workspace_id': workspace}), domain='auth.openai.com')
+                self.headers = {}
+                self.authorizations = 0
+            def close(self):
+                pass
+            def request(self, method, url, **kwargs):
+                requests.append((method, url, self))
+                body, status, location = {}, 200, None
+                if method == 'GET' and url == URL:
+                    self.authorizations += 1
+                    status = 302
+                    if self.authorizations == 1:
+                        location = 'https://auth.openai.com/log-in'
+                    elif continuation == 'callback':
+                        location = f'http://127.0.0.1:1455/auth/callback?state={state}&code=fixture-code'
+                    elif continuation == 'timeout':
+                        raise TimeoutError('private-proxy fixture-password')
+                    elif continuation == 'limited':
+                        status, body = 429, {'error': {'code': 'rate_limit_exceeded'}}
+                    else:
+                        location = 'https://auth.openai.com/' + {'login': 'log-in', 'mfa': 'mfa-challenge/fixture-factor'}.get(continuation, 'add-phone')
+                elif method == 'POST' and url.endswith('/api/accounts/authorize/continue'):
+                    body = {'page': {'type': 'login_password'}, 'continue_url': '/log-in/password'}
+                elif method == 'POST' and url.endswith('/api/accounts/password/verify'):
+                    body = {'page': {'type': 'mfa_challenge' if mfa else 'add_phone'}, 'continue_url': '/mfa-challenge/fixture-factor' if mfa else '/add-phone'}
+                elif method == 'POST' and url.endswith('/api/accounts/mfa/issue_challenge'):
+                    pass
+                elif method == 'POST' and url.endswith('/api/accounts/mfa/verify'):
+                    body = {'page': {'type': 'add_phone'}, 'continue_url': '/add-phone', 'private': 'fixture-password private-body'}
+                else:
+                    raise AssertionError(f'Unexpected offline request: {method} {url}')
+                headers = {'Content-Type': 'application/json'}
+                if location:
+                    headers['Location'] = location
+                return types.SimpleNamespace(status_code=status, url=url, headers=headers, text=json.dumps(body), json=lambda: body)
+
+        def session(**kwargs):
+            value = Session()
+            sessions.append(value)
+            return value
+
+        with patch.object(chatgpt_client, 'create_http_session', side_effect=session), patch.object(oauth_client, 'create_http_session', side_effect=session), patch.object(oauth_client, 'build_sentinel_token', return_value='fixture-sentinel'), patch.object(oauth_client.OAuthClient, '_visit_oauth_page'), patch.object(socket, 'create_connection', side_effect=AssertionError('Network forbidden')), patch.object(runner, 'emit', side_effect=lambda event, **fields: messages.append({'event': event, **fields})):
+            runner.run(data)
+        self.assertTrue(all(session is sessions[0] for _, _, session in requests))
+        self.assertNotIn('fixture-password', json.dumps(messages))
+        self.assertNotIn('private-body', json.dumps(messages))
+        return messages, [(method, url) for method, url, _ in requests]
+
+    def test_mfa_phone_transition_resumes_original_authorization_in_same_session(self):
+        messages, requests = self.phone_flow()
+        self.assertEqual(messages[-1]['event'], 'complete')
+        self.assertEqual(requests.count(('GET', URL)), 2)
+        self.assertEqual(sum(url.endswith('/mfa/verify') for _, url in requests), 1)
+        self.assertEqual(sum(url.endswith('/password/verify') for _, url in requests), 1)
+        self.assertTrue(any(m.get('entry', {}).get('action') == 'authorization_resume' for m in messages))
+
+    def test_persistent_phone_requirement_is_not_reported_as_mfa_failure(self):
+        messages, requests = self.phone_flow(continuation='phone')
+        self.assertEqual(messages[-1]['code'], 'human')
+        self.assertEqual(messages[-1]['diagnostic']['stage'], 'phone')
+        self.assertEqual(messages[-1]['diagnostic']['reason'], 'phone_required')
+        self.assertEqual(requests.count(('GET', URL)), 2)
+
+    def test_phone_requirement_without_verified_mfa_does_not_restart_login(self):
+        messages, requests = self.phone_flow(mfa=False)
+        self.assertEqual(messages[-1]['diagnostic']['reason'], 'phone_required')
+        self.assertEqual(messages[-1]['diagnostic']['stage'], 'phone')
+        self.assertEqual(requests.count(('GET', URL)), 1)
+
+    def test_session_continuation_never_replays_password_or_mfa(self):
+        for continuation in ['login', 'mfa']:
+            with self.subTest(continuation=continuation):
+                messages, requests = self.phone_flow(continuation=continuation)
+                self.assertEqual(messages[-1]['diagnostic']['reason'], 'session_login_required')
+                self.assertEqual(sum(url.endswith('/password/verify') for _, url in requests), 1)
+                self.assertEqual(sum(url.endswith('/mfa/verify') for _, url in requests), 1)
+
+    def test_session_continuation_still_checks_callback_state(self):
+        messages, _ = self.phone_flow(state='wrong')
+        self.assertFalse(any(m['event'] == 'complete' for m in messages))
+
+    def test_session_continuation_still_checks_explicit_workspace(self):
+        messages, _ = self.phone_flow(workspace='personal-workspace', workspace_id='different-workspace')
+        self.assertEqual(messages[-1]['code'], 'workspace')
+        self.assertFalse(any(m['event'] == 'complete' for m in messages))
+
+    def test_session_continuation_preserves_transport_and_rate_limit_errors(self):
+        for continuation, reason in [('timeout', 'request_timeout'), ('limited', 'rate_limited')]:
+            with self.subTest(continuation=continuation):
+                messages, requests = self.phone_flow(continuation=continuation)
+                self.assertEqual(messages[-1]['diagnostic']['reason'], reason)
+                self.assertEqual(requests.count(('GET', URL)), 2)
+
     def mfa_failure(self, issue_status, verify_status=200):
         messages = []
         data = {'notes': f'{EMAIL}----fixture-password----{SECRET}', 'email': EMAIL, 'proxy': 'http://fixture:pass@127.0.0.1:21001', 'authorizationUrl': URL, 'accountId': 'original-workspace'}

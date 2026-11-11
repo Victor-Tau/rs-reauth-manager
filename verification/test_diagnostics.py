@@ -49,6 +49,14 @@ class DiagnosticTests(unittest.TestCase):
             self.assertEqual(v['code'], 'human')
             self.assertEqual(v['diagnostic']['reason'], expected)
 
+    def test_phone_and_session_steps_override_the_last_mfa_request_stage(self):
+        for source, stage in [('phone_required', 'phone'), ('add_phone_requires_sms_client', 'phone'), ('session_login_required', 'login')]:
+            with self.subTest(source=source):
+                value = describe_failure({'error': source}, attempt={'stage': 'mfa_verify', 'httpStatus': 200})
+                self.assertEqual(value['code'], 'human')
+                self.assertEqual(value['diagnostic']['stage'], stage)
+                self.assertNotEqual(value['diagnostic']['reason'], 'mfa_verification_failed')
+
     def test_identity_and_callback_not_reported_as_network_faults(self):
         self.assertEqual(describe_failure({'error': 'fallback_identity'})['diagnostic']['stage'], 'identity')
         self.assertEqual(describe_failure({'error': 'state'})['diagnostic']['reason'], 'state_mismatch')

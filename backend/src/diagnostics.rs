@@ -23,6 +23,9 @@ pub fn trace(entry: &Value) -> Option<LogEntry> {
         "transport" => "传输失败",
         "workspace_candidates" => "提取工作区候选",
         "callback_result" => "提取并校验授权回调",
+        "mfa_verified" => "2FA 验证已通过",
+        "phone_required" => "上游要求添加手机号或手机验证",
+        "authorization_resume" => "复用已验证会话继续原授权（仅一次）",
         _ => return None,
     };
     let stage = message(
@@ -118,7 +121,10 @@ pub fn message(output: &Value, fallback: &str) -> String {
         "email_code_required" => "上游要求邮箱验证码，当前任务不支持人工补码续跑",
         "email_code_rejected" => "上游拒绝邮箱验证码",
         "email_verification_failed" => "邮箱验证流程未完成",
-        "phone_required" => "上游要求手机验证，需要人工完成",
+        "phone_required" => "上游要求添加手机号或手机验证，当前任务不支持短信验证，未取得授权回调",
+        "session_login_required" => {
+            "继续授权时上游再次要求登录或 2FA，已停止，不重复提交密码或动态码"
+        }
         "profile_required" => "上游要求补充账号资料",
         "security_challenge" => "上游要求浏览器安全验证，需要人工完成",
         "rate_limited" => "上游限制登录频率，不自动重试",

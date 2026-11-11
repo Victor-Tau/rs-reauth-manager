@@ -36,8 +36,11 @@ if data["email"].startswith("slow"):
 elif data["email"].startswith("failed"):
     print(json.dumps({"event": "error", "code": "password"}), flush=True)
 elif data["email"].startswith('diagnostic_'):
-    cases = {'diagnostic_issue': {'stage': 'mfa_issue', 'reason': 'mfa_issue_failed', 'httpStatus': 403}, 'diagnostic_limit': {'stage': 'mfa_verify', 'reason': 'rate_limited', 'httpStatus': 429}, 'diagnostic_transport': {'stage': 'password', 'reason': 'request_timeout', 'httpStatus': None}, 'diagnostic_unsafe': {'stage': 'private-host', 'reason': 'fixture-password', 'httpStatus': 'fallback-private-rt'}}
+    cases = {'diagnostic_phone': {'stage': 'phone', 'reason': 'phone_required', 'httpStatus': 200}, 'diagnostic_session': {'stage': 'login', 'reason': 'session_login_required', 'httpStatus': 200}, 'diagnostic_issue': {'stage': 'mfa_issue', 'reason': 'mfa_issue_failed', 'httpStatus': 403}, 'diagnostic_limit': {'stage': 'mfa_verify', 'reason': 'rate_limited', 'httpStatus': 429}, 'diagnostic_transport': {'stage': 'password', 'reason': 'request_timeout', 'httpStatus': None}, 'diagnostic_unsafe': {'stage': 'private-host', 'reason': 'fixture-password', 'httpStatus': 'fallback-private-rt'}}
     diagnostic = cases[data['email'].split('@')[0]]
+    if data['email'].startswith('diagnostic_phone'):
+        for action, stage in [('mfa_verified', 'mfa_verify'), ('authorization_resume', 'authorize'), ('phone_required', 'phone')]:
+            print(json.dumps({'event': 'diagnostic', 'entry': {'action': action, 'stage': stage, 'raw': 'fixture-password'}}), flush=True)
     print(json.dumps({'event': 'error', 'code': 'protocol', 'diagnostic': diagnostic, 'rawResponse': 'fixture-password fallback-private-rt'}), flush=True)
 elif data["email"].startswith("force_") and not data.get("forceWorkspaceId"):
     print(json.dumps({"event": "error", "code": "workspace", "workspaces": [{"id": "alternate-workspace"}, {"id": "second-workspace"}]}), flush=True)

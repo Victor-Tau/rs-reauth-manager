@@ -98,6 +98,9 @@ def run(data):
     if forced is not None and (not isinstance(forced, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", forced) or forced == target):
         raise ValueError("workspace")
 
+    class PhoneVerificationRequired(RuntimeError):
+        pass
+
     class BoundOAuthClient(OAuthClient):
         bound_workspace = False
         selected_workspace = forced or target
@@ -105,9 +108,34 @@ def run(data):
         unbound_workspace = False
         last_attempt = None
         failed_authorization = None
+        mfa_verified = False
+        phone_required = False
+        session_continuation = False
 
         def trace(self, action, **fields):
             emit('diagnostic', entry={'action': action, **fields})
+
+        def _oauth_complete_totp_mfa_for_continue(self, **kwargs):
+            if self.session_continuation:
+                self.last_oauth_error = 'session_login_required'
+                return ''
+            next_url = super()._oauth_complete_totp_mfa_for_continue(**kwargs)
+            if next_url and not self.last_oauth_error:
+                self.mfa_verified = True
+                self.trace('mfa_verified', stage='mfa_verify')
+            return next_url
+
+        def _oauth_drive_external_login_for_continue(self, **kwargs):
+            if self.session_continuation:
+                self.last_oauth_error = 'session_login_required'
+                return ''
+            return super()._oauth_drive_external_login_for_continue(**kwargs)
+
+        def _oauth_complete_add_phone_for_continue(self, *args, **kwargs):
+            # The plugin has no SMS provider; preserve the actual stopped step
+            self.phone_required = True
+            self.trace('phone_required', stage='phone')
+            raise PhoneVerificationRequired('phone_required')
 
         def _oauth_request(self, method, url, **kwargs):
             self.last_attempt = {'stage': stage_for_url(url), 'httpStatus': None}
@@ -226,11 +254,32 @@ def run(data):
     try:
         emit("step", step="login")
         def authorize(url, expected):
+            def attempt(*, session_only=False):
+                try:
+                    return oauth.authorize_external_oauth_url(url, chat, expected_state=expected, user_agent=chat.ua, impersonate=chat.impersonate, email=email, password='' if session_only else password, mfa_client=None if session_only else ProgressMfa(secret), max_hops=20)
+                except PhoneVerificationRequired:
+                    return {'ok': False, 'error': 'phone_required'}
+
             oauth.last_attempt = None
             oauth.failed_authorization = None
-            result = oauth.authorize_external_oauth_url(url, chat, expected_state=expected, user_agent=chat.ua, impersonate=chat.impersonate, email=email, password=password, mfa_client=ProgressMfa(secret), max_hops=20)
+            oauth.mfa_verified = False
+            oauth.phone_required = False
+            result = attempt()
+            if isinstance(result, dict) and result.get('ok') is not True and oauth.phone_required and oauth.mfa_verified:
+                # Continue only the same host-owned OAuth flow in the verified session
+                # A second phone step or login challenge stops without replaying credentials
+                oauth.trace('authorization_resume', stage='authorize')
+                oauth.phone_required = False
+                oauth.last_attempt = None
+                oauth.session_continuation = True
+                try:
+                    result = attempt(session_only=True)
+                finally:
+                    oauth.session_continuation = False
             oauth.trace('callback_result', stage='callback', found=isinstance(result, dict) and result.get('ok') is True, stateMatched=isinstance(result, dict) and result.get('state') == expected)
             if not isinstance(result, dict) or result.get('ok') is not True:
+                if oauth.phone_required:
+                    result = {'error': 'phone_required'}
                 oauth.failed_authorization = describe_failure(result, attempt=oauth.last_attempt)
             return result
 

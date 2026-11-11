@@ -331,7 +331,7 @@ try {
     assert.equal(a.planType, 'free'); assert.equal(a.enabled, false); assert.equal(saves.at(-1), id); assert.equal(disables.length, disabled + 1); assert.ok(saves.length > saved)
     check('No-candidate failure requires explicit Free fallback confirmation and writes the verified Free token')
   }
-  for (const [id, expected] of [['diagnostic_issue', /创建 2FA 验证挑战.*HTTP 403/], ['diagnostic_limit', /限制登录频率.*HTTP 429/], ['diagnostic_transport', /密码验证.*请求超时/], ['diagnostic_unsafe', /未取得可公开的具体错误/]]) {
+  for (const [id, expected] of [['diagnostic_session', /再次要求登录或 2FA.*不重复提交/], ['diagnostic_issue', /创建 2FA 验证挑战.*HTTP 403/], ['diagnostic_limit', /限制登录频率.*HTTP 429/], ['diagnostic_transport', /密码验证.*请求超时/], ['diagnostic_unsafe', /未取得可公开的具体错误/]]) {
     const a = make(id); accounts.push(a); revisions.set(id, 1)
     const before = structuredClone(a), saved = saves.length, completed = completes.length
     await submit([id]); const done = await finish(id)
@@ -370,6 +370,16 @@ try {
     for (let i = 0; i < 100; i++) { await tick(); const j = records.get('queue').value.jobs.find(j => j.requestId === `${requestId}${suffix}`); if (!['queued', 'running'].includes(j.status)) return j; await new Promise(r => setTimeout(r, 20)) }
     throw new Error('Import did not finish')
   }
+  const phoneImport = importPayload('diagnostic_phone'), beforePhoneImport = completes.length
+  assert.equal((await request('import', phoneImport)).status, 200)
+  const phoneJob = await finishImport(phoneImport.requestId)
+  assert.equal(phoneJob.status, 'failed'); assert.match(phoneJob.message, /手机验证.*不支持短信验证/)
+  assert.ok(!phoneJob.message.includes('2FA 验证流程未完成'))
+  assert.equal(phoneJob.logs.filter(entry => entry.message.includes('仅一次')).length, 1)
+  assert.ok(phoneJob.logs.some(entry => entry.message.includes('2FA 验证已通过')))
+  assert.ok(!JSON.stringify(phoneJob).includes('fixture-password')); assert.equal(completes.length, beforePhoneImport)
+  assert.ok(!accounts.some(a => a.email === phoneImport.email))
+  check('Import reports a persistent phone requirement after a single session continuation, without creating an account or leaking credentials')
   const optionReply = await request('options'); assert.equal(optionReply.status, 200); assert.deepEqual(optionReply.value.groups, groups); assert.ok(!JSON.stringify(optionReply.value).includes('fixture:pass'))
   const payload = importPayload('import-success'), startsBeforeImport = starts.length
   assert.equal((await request('import', payload)).status, 200)

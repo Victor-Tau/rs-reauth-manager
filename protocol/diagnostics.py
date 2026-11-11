@@ -26,6 +26,7 @@ REASONS = {
     'mfa_primary_factor_required': ('human', 'primary_factor_required'),
     'phone_required': ('human', 'phone_required'),
     'add_phone_requires_sms_client': ('human', 'phone_required'),
+    'session_login_required': ('human', 'session_login_required'),
     'email_otp_requires_mail_client': ('human', 'email_code_required'),
     'email_otp_client_required': ('human', 'email_code_required'),
     'email_otp_provider_required': ('human', 'email_code_required'),
@@ -103,6 +104,10 @@ def describe_failure(result=None, *, attempt=None, exception=None):
         stage = {'log-in': 'login', 'mfa-challenge': 'mfa_factor', 'email-verification': 'email_verify', 'workspace': 'workspace', 'organization': 'organization', 'consent': 'consent', 'edge-challenge': 'authorize', 'add-phone': 'phone'}.get(page, 'unknown') if isinstance(page, str) else 'unknown'
     if reason in {'fallback_identity', 'state', 'invalid_state'}:
         stage = 'identity' if reason == 'fallback_identity' else 'callback'
+    if reason in {'phone_required', 'add_phone_requires_sms_client'}:
+        stage = 'phone'
+    if reason == 'session_login_required':
+        stage = 'login'
     code, detail = 'protocol', 'upstream_unknown'
     if status == 429 or reason in {'rate_limit_exceeded', 'too_many_requests', 'phone_verification_rate_limited'}:
         code, detail = 'limited', 'rate_limited'
