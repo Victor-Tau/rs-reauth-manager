@@ -2,8 +2,8 @@
 
 This distribution includes components from the following projects
 
-- codex-proxy-ui v0.9.0, Copyright zyycn contributors, Apache-2.0, https://github.com/zyycn/codex-proxy-ui
-- codex-proxy-rs public gateway-plugin-sdk, revision c622f085748f812936a7371fcc85d1621fa72ca8, Apache-2.0, https://github.com/zyycn/codex-proxy-rs
+- codex-proxy-ui v0.9.1, Copyright zyycn contributors, Apache-2.0, https://github.com/zyycn/codex-proxy-ui
+- codex-proxy-rs public gateway-plugin-sdk, revision 431992a7a43be32a0fad2fbc8a554732096fa299, Apache-2.0, https://github.com/zyycn/codex-proxy-rs
 - Management bridge organization adapted from codex-proxy-plugins, revision c1e1d5398990097f3987d595e5b3ea737ec2b66e, Apache-2.0, https://github.com/zyycn/codex-proxy-plugins
 - reauth-web protocol modules, Copyright (c) 2026 boji1334, MIT, revision db8251817fd1baefc83c14c851135fb6078bc001, https://github.com/boji1334/reauth-web
 

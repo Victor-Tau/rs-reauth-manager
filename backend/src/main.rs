@@ -288,7 +288,7 @@ fn notes_valid(a: &Value) -> bool {
         && !notes.contains(['\r', '\n', '\0'])
 }
 fn settings(a: &Value) -> Value {
-    json!({"id":a["id"],"email":a["email"],"name":a["name"],"enabled":a["enabled"],"notes":a["notes"],"groups":a["groups"],"proxy":a["outboundProxyEndpoint"],"proxyBinding":a["_proxyBinding"],"weight":a["weight"],"concurrencyLimit":a["concurrencyLimit"],"modelAccess":a["modelAccess"],"accountId":a["accountId"],"userId":a["userId"],"planType":a["planType"]})
+    json!({"id":a["id"],"email":a["email"],"name":a["name"],"enabled":a["enabled"],"notes":a["notes"],"groups":a["groups"],"proxy":a["outboundProxyEndpoint"],"proxyBinding":a["_proxyBinding"],"weight":a["weight"],"concurrencyLimit":a["concurrencyLimit"],"modelAccess":a["modelAccess"],"quotaLimits":a["quotaLimits"],"accountId":a["accountId"],"userId":a["userId"],"planType":a["planType"]})
 }
 fn require_idle(a: &Value) -> Result<(), PluginFault> {
     match a["capacity"]["usedSlots"].as_u64() {

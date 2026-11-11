@@ -1,3 +1,20 @@
+# 账号重新授权 v0.14.1
+
+适配 [Codex Proxy RS 3.45.1](https://github.com/zyycn/codex-proxy-rs/releases/tag/v3.45.1)，使用固定提交 `431992a7a43be32a0fad2fbc8a554732096fa299` 的公开插件 SDK 与 `cpr-plugin` 重新编译、打包。
+
+- 宿主兼容范围为 `>=3.45.1, <3.46.0`；CPR 3.44.x 请继续使用 v0.14.0。
+- 已核对 SDK、运行时、打包器及所用账号、OAuth、代理、分组和浏览器桥接口。SDK 新增客户端密钥预算窗口并调整账号预热与主动额度重置设置，本插件未使用这些接口；RPC v7、管理能力 v2、维护能力 v1 和浏览器桥 v2 保持兼容。
+- 支持显示“额度暂停”（`quota_paused`），自动授权状态筛选可单独选择；默认仍仅处理异常账号，不因达到额度上限自动重新授权。
+- 将账号 `quotaLimits` 纳入授权、退出和恢复流程的配置快照与写回核对，额度上限在登录期间变化时停止写回，不覆盖新策略。
+- 官方 UI 升级到 0.9.1，跟随宿主的主题材质与独立圆角修复。
+- 保留批量导入、默认选择首个工作区、直连与绑定代理处理及写回保护；升级不会自动重新授权账号。
+- Linux x86_64，使用 `cargo zigbuild --target x86_64-unknown-linux-gnu.2.28` 构建，要求 glibc 2.28+。构建与验证绑定同一个 CPU 核心，Cargo 单任务执行。
+- 验证通过：前端生产构建、20 个桥接场景、25 个批量操作场景、594 项源码约定检查、1440px/390px 浏览器回归、Rust fmt/Clippy、15 项 Rust 测试、85 个模拟宿主协议场景和 87 项 Python 离线测试。新增覆盖额度暂停账号的默认排除及显式自动授权、额度上限保留及并发修改保护。
+- 安装包已通过 7 个文件摘要校验、协议源码一致性检查、RPC v7 握手、内置 Python 自检、0700 私有运行目录复用与退出清理验证；最高 glibc 依赖为 `GLIBC_2.28`。
+- 使用模拟宿主及离线数据验证，尚未完成 CPR 3.45.1 实际安装与真实账号完整链路验收。
+
+下载 `.tar.gz` 和 `.tar.gz.sha256`，核对摘要后在 CPR 插件管理中安装；也可使用 GitHub 来源 `Victor-Tau/rs-reauth-manager`、标签 `v0.14.1`，选择插件 `.tar.gz` 附件。
+
 # 账号重新授权 v0.14.0
 
 新增批量导入，导入默认选择首个工作区，并改进粘贴与并发诊断。合入 [LanQin996 的 PR #2](https://github.com/Victor-Tau/rs-reauth-manager/pull/2)，宿主范围仍为 `>=3.44.0, <3.45.0`，SDK 与 `cpr-plugin` 仍固定在 [Codex Proxy RS 3.44.0](https://github.com/zyycn/codex-proxy-rs/releases/tag/v3.44.0) 提交 `c622f085748f812936a7371fcc85d1621fa72ca8`。

@@ -9,7 +9,7 @@ const python = process.env.RS_REAUTH_TEST_PYTHON || process.env.PYTHON || (proce
 const worker = fileURLToPath(new URL('./fake-worker.py', import.meta.url))
 const innerAuthorization = 'https://auth.openai.com/oauth/authorize?' + new URLSearchParams({ response_type: 'code', client_id: 'fixture', redirect_uri: 'http://127.0.0.1:1455/auth/callback', state: 'fixture', code_challenge: 'a'.repeat(43), code_challenge_method: 'S256' })
 const nativeAuthorization = 'https://chatgpt.com/codex/desktop-auth?' + new URLSearchParams({ authorize_url: innerAuthorization, codex_streamlined_login: 'true', no_universal_links: '1' })
-const make = (id, prefix = id) => ({ id, provider: 'openai', name: `team+${prefix}@example.com+workspace3`, email: `${prefix}@example.com`, authenticationKind: 'oauth', enabled: id !== 'disabled', planType: 'team', status: 'error', notes: `${prefix}@example.com----fixture-password----GEZDGNBVGY3TQOJQ`, outboundProxyEndpoint: 'http://127.0.0.1:21001', accountId: 'original-workspace', groups: [{ id: 'g1', name: 'Team' }], weight: 3, concurrencyLimit: null, modelAccess: { mode: 'all' }, hasRefreshToken: true, accessTokenExpiresAt: '2026-10-23T00:00:00Z', capacity: { usedSlots: 0, totalSlots: null } })
+const make = (id, prefix = id) => ({ id, provider: 'openai', name: `team+${prefix}@example.com+workspace3`, email: `${prefix}@example.com`, authenticationKind: 'oauth', enabled: id !== 'disabled', planType: 'team', status: 'error', notes: `${prefix}@example.com----fixture-password----GEZDGNBVGY3TQOJQ`, outboundProxyEndpoint: 'http://127.0.0.1:21001', accountId: 'original-workspace', groups: [{ id: 'g1', name: 'Team' }], weight: 3, concurrencyLimit: null, modelAccess: { mode: 'all' }, quotaLimits: { weekly: 90 }, hasRefreshToken: true, accessTokenExpiresAt: '2026-10-23T00:00:00Z', capacity: { usedSlots: 0, totalSlots: null } })
 const accounts = [make('good'), make('disabled'), make('slow'), make('failed'), make('direct_null'), make('bad_notes'), make('changed'), make('active'), make('uncertain')]
 accounts.find(a => a.id === 'direct_null').outboundProxyEndpoint = null
 accounts.find(a => a.id === 'bad_notes').notes = 'different@example.com----fixture-password----GEZDGNBVGY3TQOJQ'
@@ -214,7 +214,7 @@ try {
   assert.equal((await submit(['good', 'good'])).status, 400); assert.equal((await submit(['../escape'])).status, 400); assert.equal((await submit([])).status, 400); check('Reject duplicate, malformed and empty selections')
   const requestId = randomUUID(); await submit(['good'], requestId); await submit(['good'], requestId); assert.equal(records.get('queue').value.jobs.length, 1); assert.equal(starts.length, 0); check('Submission is idempotent and GET/submission never starts a login')
   assert.equal((await submit(['good'])).status, 400); check('Concurrent submissions cannot duplicate an account')
-  const before = structuredClone(accounts.find(a => a.id === 'good')); await tick(); assert.equal(starts.length, 1); assert.equal(completes.length, 0); const done = await finish('good'); assert.equal(done.status, 'success'); const after = accounts.find(a => a.id === 'good'); for (const k of ['enabled', 'groups', 'notes', 'weight', 'concurrencyLimit', 'outboundProxyEndpoint', 'name', 'accountId']) assert.deepEqual(after[k], before[k]); check('Real SDK process completes native OAuth start/complete and verifies unchanged configuration')
+  const before = structuredClone(accounts.find(a => a.id === 'good')); await tick(); assert.equal(starts.length, 1); assert.equal(completes.length, 0); const done = await finish('good'); assert.equal(done.status, 'success'); const after = accounts.find(a => a.id === 'good'); for (const k of ['enabled', 'groups', 'notes', 'weight', 'concurrencyLimit', 'outboundProxyEndpoint', 'name', 'accountId', 'quotaLimits']) assert.deepEqual(after[k], before[k]); check('Real SDK process completes native OAuth start/complete and verifies unchanged configuration')
   await submit(['disabled']); assert.equal((await finish('disabled')).status, 'success'); assert.equal(accounts.find(a => a.id === 'disabled').enabled, false); check('Disabled account remains disabled after reauthorization')
   const freeBefore = structuredClone(free); const freeStarts = starts.length, freeCompletes = completes.length; await submit(['free']); assert.equal((await finish('free')).status, 'success'); assert.equal(starts.length, freeStarts + 1); assert.equal(completes.length, freeCompletes + 1); for (const k of ['id', 'enabled', 'groups', 'notes', 'outboundProxyEndpoint', 'name', 'accountId', 'planType']) assert.deepEqual(free[k], freeBefore[k]); check('Free account completes original-account authorization while preserving proxy and configuration')
   for (const id of ['bad_notes', 'active', 'api_key', 'other_provider']) { const old = starts.length; await submit([id]); assert.equal((await finish(id)).status, 'failed'); assert.equal(starts.length, old) } check('Invalid notes, active requests and unsupported credentials stop before login')
@@ -227,7 +227,7 @@ try {
   const directEmpty = proxyAccount('direct_empty'); directEmpty.outboundProxyEndpoint = ''
   for (const a of [accounts.find(a => a.id === 'direct_null'), directEmpty]) {
     const before = structuredClone(a); await submit([a.id]); assert.equal((await finish(a.id)).status, 'success')
-    for (const key of ['id', 'enabled', 'groups', 'notes', 'outboundProxyEndpoint', 'name', 'accountId']) assert.deepEqual(a[key], before[key])
+    for (const key of ['id', 'enabled', 'groups', 'notes', 'outboundProxyEndpoint', 'name', 'accountId', 'quotaLimits']) assert.deepEqual(a[key], before[key])
   }
   check('Null and empty proxy settings complete reauthorization through direct workers without exporting credentials or changing settings')
   for (const value of [undefined, false]) {
@@ -254,6 +254,8 @@ try {
   const invalidPage = proxyAccount('proxy_invalid_page'); invalidProxyPage = true; const beforeInvalidPage = starts.length; await submit([invalidPage.id]); assert.equal((await finish(invalidPage.id)).status, 'failed'); assert.equal(starts.length, beforeInvalidPage); invalidProxyPage = false; check('Unbounded or malformed proxy pagination fails before login')
   await submit(['failed']); assert.equal((await finish('failed')).status, 'failed'); assert.match(job('failed').message, /密码/); check('Password rejection returns a safe actionable error')
   await submit(['changed']); await tick(); accounts.find(a => a.id === 'changed').enabled = false; const count = completes.length; assert.equal((await finish('changed')).status, 'review'); assert.equal(completes.length, count); check('Configuration changes during login block credential writeback')
+  const quotaChanged = proxyAccount('quota_limits_changed'); await submit([quotaChanged.id]); await tick(); quotaChanged.quotaLimits.weekly = 75
+  const beforeQuotaChange = completes.length; assert.equal((await finish(quotaChanged.id)).status, 'review'); assert.equal(completes.length, beforeQuotaChange); check('Concurrent quota limit changes block OAuth writeback without overwriting the new policy')
   await submit(['credential_changed']); await tick(); revisions.set('credential_changed', 2); const previous = completes.length; assert.equal((await finish('credential_changed')).status, 'review'); assert.equal(completes.length, previous); check('Concurrent credential rotation blocks stale OAuth writeback')
   await submit(['slow', 'good']); await tick(); const startsBefore = starts.length; const c = completes.length; await request('cancel', { requestId: null }); await tick(); assert.equal(job('slow').status, 'cancelled'); assert.equal(job('good').status, 'cancelled'); assert.equal(starts.length, startsBefore); assert.equal(completes.length, c); check('Cancel kills current helper and stops all later accounts without writeback')
   failComplete = true; await submit(['uncertain']); assert.equal((await finish('uncertain')).status, 'review'); const committed = completes.length; await tick(); await tick(); assert.equal(completes.length, committed); failComplete = false; check('Uncertain native commit is never automatically replayed')
@@ -471,6 +473,17 @@ try {
   check('Successful manual verification clears the automatic block despite an older review record')
   assert.equal((await request('config', { enabled: true, automation: { ...autoConfig, enabled: false } })).status, 200)
   check('Maintenance scans intersect group/status/plan, persist configuration/cooldown and avoid duplicate authorization after restart')
+  const quotaPaused = proxyAccount('quota_paused'); quotaPaused.status = 'quota_paused'; quotaPaused.planType = 'free'; quotaPaused.groups = [{ id: 'quota-only', name: 'Quota only' }]
+  const quotaConfig = { ...autoConfig, groupIds: ['quota-only'] }
+  assert.equal((await request('accounts')).value.accounts.find(a => a.id === quotaPaused.id).status, 'quota_paused')
+  await request('config', { enabled: true, automation: quotaConfig }); records.get('queue').value.last_scan_at = 0; const beforeQuotaScan = starts.length
+  await call('plugin.reconcile', {}, Buffer.alloc(0), 'maintenance'); assert.equal(starts.length, beforeQuotaScan)
+  assert.equal((await request('config', { enabled: true, automation: { ...quotaConfig, statuses: ['quota_paused'] } })).status, 200)
+  records.get('queue').value.last_scan_at = 0; await call('plugin.reconcile', {}, Buffer.alloc(0), 'maintenance')
+  assert.equal(starts.length, beforeQuotaScan + 1); assert.equal(starts.at(-1).accountId, quotaPaused.id)
+  assert.equal((await finish(quotaPaused.id)).status, 'success'); assert.deepEqual(quotaPaused.quotaLimits, { weekly: 90 })
+  await request('config', { enabled: true, automation: { ...quotaConfig, enabled: false } })
+  check('Quota-paused accounts are listed, excluded by default, explicitly selectable for automation, and retain quota limits')
   const directAuto = proxyAccount('direct_auto'); directAuto.outboundProxyEndpoint = null; directAuto.planType = 'free'; directAuto.groups = [{ id: 'direct-only', name: 'Direct only' }]
   const directConfig = { ...autoConfig, allGroups: false, groupIds: ['direct-only'], includeUngrouped: false, intervalMinutes: 1 }
   await request('config', { enabled: true, automation: directConfig })

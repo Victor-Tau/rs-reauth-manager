@@ -18,7 +18,7 @@ try {
       let enabled = true, jobs = []
       let automation = { enabled: false, intervalMinutes: 15, cooldownHours: 24, allGroups: true, groupIds: [], includeUngrouped: true, statuses: ['error'], allPlans: true, plans: [], enabledOnly: true }
       const account = { id: 'fixture', name: 'fixture', email: 'fixture@example.com', enabled: true, planType: 'free', status: 'error', accessTokenExpiresAt: null, proxy: null, notesValid: true, groups: [{ id: 'g1', name: '测试组' }, { id: 'g2', name: '共享组' }] }
-      const accounts = [account, { ...account, id: 'second', email: 'second@example.com', groups: [{ id: 'g2', name: '共享组' }] }, { ...account, id: 'ungrouped', email: 'ungrouped@example.com', groups: [] }]
+      const accounts = [account, { ...account, id: 'second', email: 'second@example.com', status: 'quota_paused', groups: [{ id: 'g2', name: '共享组' }] }, { ...account, id: 'ungrouped', email: 'ungrouped@example.com', groups: [] }]
       window.__calls = []
       window.codexProxyPlugin = { version: 2, theme: 'light', async request(input) {
         window.__calls.push(input)
@@ -66,6 +66,7 @@ try {
     const child = page.frames().find(f => f !== page.mainFrame())
     await scope.getByText('插件已开启', { exact: true }).waitFor()
     await scope.getByText('直连（不使用代理）', { exact: true }).first().waitFor()
+    await scope.getByText('额度暂停', { exact: true }).first().waitFor()
     const directReauth = scope.getByRole('button', { name: '重新授权 fixture@example.com', exact: true })
     assert.equal(await directReauth.isEnabled(), true)
     await directReauth.click()

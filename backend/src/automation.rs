@@ -49,7 +49,14 @@ impl Automation {
             || self.statuses.is_empty()
             || self.statuses.len() > 10
             || self.statuses.iter().any(|s| {
-                !["normal", "error", "quota_exhausted", "rate_limited"].contains(&s.as_str())
+                ![
+                    "normal",
+                    "error",
+                    "quota_paused",
+                    "quota_exhausted",
+                    "rate_limited",
+                ]
+                .contains(&s.as_str())
             })
             || self
                 .group_ids

@@ -15,7 +15,7 @@ const emit = defineEmits<{ saved: [] }>()
 const config = ref(defaultAutomation()), groups = ref<AccountGroup[]>([])
 const ready = ref(false), loading = ref(true), saving = ref(false), error = ref(''), saved = ref(false)
 const interval = ref('15'), cooldown = ref('24')
-const statuses = ['error', 'normal', 'quota_exhausted', 'rate_limited'].map(value => ({ value, label: statusText({ status: value, enabled: true } as Account) }))
+const statuses = ['error', 'normal', 'quota_paused', 'quota_exhausted', 'rate_limited'].map(value => ({ value, label: statusText({ status: value, enabled: true } as Account) }))
 const plans = computed(() => [...new Set(['free', 'plus', 'pro', 'team', 'business', 'unknown', ...props.accounts.map(a => planKey(a.planType)), ...config.value.plans])])
 function toggle(key: 'groupIds' | 'statuses' | 'plans', value: string, checked: boolean) { config.value[key] = checked ? [...new Set([...config.value[key], value])] : config.value[key].filter(v => v !== value); saved.value = false }
 const matches = computed(() => props.accounts.filter(a => {
