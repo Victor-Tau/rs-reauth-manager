@@ -1,3 +1,14 @@
+# 账号重新授权 v0.14.5
+
+适配 Codex Proxy RS 3.51.0，使用固定提交 `ba2afe67d04755a247a9d534115ac168d4db7478` 的公开插件 SDK 与 `cpr-plugin` 重新编译、打包。
+
+- 宿主兼容范围为 `>=3.51.0, <3.52.0`；CPR 3.49.x 请继续使用 v0.14.4，3.48.x 请使用 v0.14.3。
+- 已核对 3.49.0 至 3.51.0 的插件 SDK 差异：调度器能力升至 v4、新增额度历史读取接口，本插件均未使用；RPC v7、管理能力 v2、维护能力 v1 和浏览器桥 v2 保持兼容。
+- 官方 `@codex-proxy/ui` 更新至 0.12.0。
+- Linux x86_64 安装包继续以 `x86_64-unknown-linux-gnu.2.28` 构建，要求 glibc 2.28+；升级不会自动重新授权账号。
+
+下载 `.tar.gz` 和 `.sha256`，核对摘要后在 CPR 插件管理中升级；也可使用 GitHub 来源 `Victor-Tau/rs-reauth-manager`、标签 `v0.14.5`，选择插件 `.tar.gz` 附件。
+
 # 账号重新授权 v0.14.4
 
 适配 Codex Proxy RS 3.49.0，使用固定提交 `4ee9abf9d2f5889b34202ade7597ff8cd5c2de22` 的公开插件 SDK 与 `cpr-plugin` 重新编译、打包。
