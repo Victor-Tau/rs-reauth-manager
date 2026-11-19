@@ -19,7 +19,9 @@ const emit = defineEmits<{ submitted: [] }>()
 const options = ref<Options>({ groups: [], proxies: [] }), ready = ref(false), loading = ref(false), busy = ref(false), error = ref(''), message = ref('')
 const email = ref(''), password = ref(''), secret = ref(''), name = ref(''), workspace = ref(''), proxyId = ref(''), loginProxy = ref('')
 const transport = ref<'http' | 'prefer_websocket'>('prefer_websocket'), enabled = ref(true), saveLogin = ref(true), notes = ref(''), groupIds = ref<string[]>([])
-const concurrency = ref(''), weight = ref('5'), mode = ref<'all' | 'allowlist' | 'denylist'>('all'), models = ref('')
+const concurrency = ref(''), weight = ref('5')
+const DEFAULT_MODELS = ['gpt-6.2-sol', 'gpt-6.1-sol', 'gpt-5.6-sol', 'gpt-6.2-astra', 'gpt-6-astra', 'gpt-5.6-terra', 'gpt-6.1-terra', 'gpt-6-sol', 'codex-auto-review']
+const models = ref(DEFAULT_MODELS.join('\n'))
 const submittedId = ref('')
 const batchMode = ref(false), batchText = ref(''), batchPrefix = ref('')
 const batchJobs = computed(() => batchPrefix.value ? props.jobs.filter(j => j.requestId.startsWith(batchPrefix.value)) : [])
@@ -54,18 +56,18 @@ async function submit() {
   if (busy.value || !ready.value || !props.enabled || pending.value) return
   error.value = ''; message.value = ''
   const limit = concurrency.value.trim() === '' ? null : Number(concurrency.value), w = Number(weight.value)
-  const modelIds = mode.value === 'all' ? [] : [...new Set(models.value.split(/[\s,，]+/).filter(Boolean))].sort()
+  const modelIds = [...new Set(models.value.split(/[\s,，]+/).filter(Boolean))].sort()
   if (!batchMode.value && (!email.value.trim() || !password.value || !secret.value.trim())) { error.value = '请填写邮箱、密码和 2FA 验证器密钥'; return }
   let entries
   try { entries = batchMode.value ? parseImportCredentials(batchText.value) : [{ email: email.value.trim(), password: password.value, totpSecret: secret.value }] }
   catch (e) { error.value = (e as Error).message; return }
   if (limit !== null && (!Number.isSafeInteger(limit) || limit < 1 || limit > 4294967295) || !Number.isSafeInteger(w) || w < 1 || w > 100) { error.value = '并发限制留空或填写 1–4294967295 的整数，权重为 1–100'; return }
-  if (mode.value !== 'all' && (!modelIds.length || modelIds.length > 256)) { error.value = '模型列表需包含 1–256 个精确模型 ID'; return }
+  if (!modelIds.length || modelIds.length > 256) { error.value = '模型列表需包含 1–256 个精确模型 ID'; return }
   if (modelIds.some(s => s.startsWith('__') || s.includes('*') || new TextEncoder().encode(s).length > 256 || /[\u0000-\u001f\u007f]/.test(s))) { error.value = '模型 ID 不支持通配符、控制字符及保留前缀，最多 256 字节'; return }
   busy.value = true
   try {
     const id = requestId()
-    const bodies: ImportRequest[] = entries.map(({ email, password, totpSecret }) => ({ requestId: batchMode.value ? requestId() : id, email, password, totpSecret, name: batchMode.value ? email : name.value.trim() || email, workspaceId: workspace.value.trim(), transport: transport.value, outboundProxyId: proxyId.value, loginProxyUrl: proxyId.value ? loginProxy.value.trim() : '', saveLoginNotes: saveLogin.value, settings: { notes: notes.value, enabled: enabled.value, concurrencyLimit: limit, weight: w, modelAccess: { mode: mode.value, models: modelIds }, groupIds: [...groupIds.value] } }))
+    const bodies: ImportRequest[] = entries.map(({ email, password, totpSecret }) => ({ requestId: batchMode.value ? requestId() : id, email, password, totpSecret, name: batchMode.value ? email : name.value.trim() || email, workspaceId: workspace.value.trim(), transport: transport.value, outboundProxyId: proxyId.value, loginProxyUrl: proxyId.value ? loginProxy.value.trim() : '', saveLoginNotes: saveLogin.value, settings: { notes: notes.value, enabled: enabled.value, concurrencyLimit: limit, weight: w, modelAccess: { mode: 'allowlist', models: modelIds }, groupIds: [...groupIds.value] } }))
     if (new TextEncoder().encode(JSON.stringify({ requestId: id, accounts: bodies })).length > 131072) throw new Error('本批资料超过请求容量，请减少账号数量后提交')
     submittedId.value = batchMode.value ? `${id}:import:0` : `${id}:import`
     if (batchMode.value) { await api.importBatch(id, bodies); batchPrefix.value = `${id}:import:` }
@@ -119,8 +121,7 @@ onUnmounted(() => { password.value = ''; secret.value = ''; loginProxy.value = '
             <label class="field-label" v-if="selectedProxy?.hasAuthentication">登录代理认证地址（可选）<ZInput v-model="loginProxy" type="password" autocomplete="new-password" placeholder="无关联账号可读取认证时，填写完整代理 URL" aria-label="登录代理认证地址" /><small>优先复用所选代理关联账号的认证信息，手填地址必须与所选代理的协议、主机及端口一致，仅用于本次登录</small></label>
             <ZSwitch v-model="enabled" label="导入完成后启用调度" aria-label="导入完成后启用调度" />
             <div class="field-block"><h3>所属分组</h3><div class="choice-grid"><ZCheckbox v-for="g in options.groups" :key="g.id" :model-value="groupIds.includes(g.id)" :label="g.name" @change="selectGroup(g.id, $event)" /><span v-if="!options.groups.length" class="muted">暂无分组，导入为未分组账号</span></div></div>
-            <label class="field-label">模型权限<ZSelect v-model="mode" :options="[{ value: 'all', label: '全部模型' }, { value: 'allowlist', label: '仅允许指定模型' }, { value: 'denylist', label: '拒绝指定模型' }]" aria-label="导入账号模型权限" /></label>
-            <label class="field-label" v-if="mode !== 'all'">模型 ID<ZTextarea v-model="models" :rows="3" placeholder="每行一个精确模型 ID，不支持通配符" aria-label="导入账号模型列表" /></label>
+            <label class="field-label">模型 ID（仅允许以下模型）<ZTextarea v-model="models" :rows="9" placeholder="每行一个精确模型 ID，不支持通配符" aria-label="导入账号模型列表" /><small>默认已填入常用模型，可增删，导入账号只允许调用列表中的模型</small></label>
           </div>
         </ZCard>
         <ZCard as="div" class="settings-card" title="备注与提交">

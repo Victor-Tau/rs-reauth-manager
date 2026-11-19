@@ -73,8 +73,8 @@ impl Settings {
                 .is_some_and(|v| v == 0 || v > u32::MAX as u64)
             || self.group_ids.len() > 100
             || self.group_ids.iter().any(|s| s.is_empty() || s.len() > 128)
-            || !["all", "allowlist", "denylist"].contains(&m.mode.as_str())
-            || (m.mode == "all") != m.models.is_empty()
+            || m.mode != "allowlist"
+            || m.models.is_empty()
             || m.models.len() > 256
             || m.models.iter().any(|s| {
                 s.is_empty()
@@ -563,8 +563,8 @@ mod tests {
             concurrency_limit: None,
             weight: 100,
             model_access: ModelAccess {
-                mode: "all".into(),
-                models: vec![],
+                mode: "allowlist".into(),
+                models: vec!["gpt-6.2-sol".into()],
             },
             group_ids: vec![],
         };
@@ -576,7 +576,10 @@ mod tests {
         assert!(s.validate().is_err());
         s.concurrency_limit = Some(u32::MAX.into());
         assert!(s.validate().is_ok());
+        s.model_access.mode = "all".into();
+        assert!(s.validate().is_err());
         s.model_access.mode = "allowlist".into();
+        s.model_access.models.clear();
         assert!(s.validate().is_err());
         s.model_access.models.push("gpt-5".into());
         assert!(s.validate().is_ok());

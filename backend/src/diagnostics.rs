@@ -22,6 +22,8 @@ pub fn trace(entry: &Value) -> Option<LogEntry> {
         "response" => "收到响应",
         "transport" => "传输失败",
         "workspace_candidates" => "提取工作区候选",
+        "workspace_check" => "核对工作区绑定",
+        "workspace_reselect" => "原工作区未绑定，同会话重选",
         "callback_result" => "提取并校验授权回调",
         "mfa_verified" => "2FA 验证已通过",
         "phone_required" => "上游要求添加手机号或手机验证",
@@ -55,6 +57,11 @@ pub fn trace(entry: &Value) -> Option<LogEntry> {
         ("callbackFound", "回调"),
         ("continueFound", "继续地址"),
         ("stateMatched", "state 匹配"),
+        ("bound", "已调用工作区选择"),
+        ("hasSession", "会话含数据"),
+        ("targetListed", "原工作区在会话列表"),
+        ("defaultMatches", "默认工作区即原工作区"),
+        ("hasDefault", "会话含默认工作区"),
     ] {
         if let Some(value) = entry[key].as_bool() {
             parts.push(format!("{label} {}", if value { "是" } else { "否" }));

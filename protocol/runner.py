@@ -319,6 +319,12 @@ def run(data):
                 return
             if result.get("state") != state or not result.get("code"):
                 raise ValueError("state")
+            if not importing and not forced:
+                snapshot = oauth._decode_oauth_session_cookie()
+                snapshot = snapshot if isinstance(snapshot, dict) else {}
+                rows = snapshot.get("workspaces") if isinstance(snapshot.get("workspaces"), list) else []
+                row_ids = [w.get("id") for w in rows if isinstance(w, dict)]
+                oauth.trace('workspace_check', stage='workspace', count=len(row_ids), bound=oauth.bound_workspace, hasSession=bool(snapshot), targetListed=target in row_ids, defaultMatches=snapshot.get("workspace_id") == target, hasDefault=bool(snapshot.get("workspace_id")))
             if not oauth.workspace_matches() and not importing and not forced:
                 session = oauth._decode_oauth_session_cookie() or {}
                 listed = [w.get("id") for w in session.get("workspaces", []) if isinstance(w, dict)] if isinstance(session.get("workspaces"), list) else []

@@ -392,10 +392,10 @@ try {
   assert.deepEqual(created.groups, groups); assert.equal(importUpdates.at(-2).enabled, false); assert.equal(importUpdates.at(-1).enabled, true)
   assert.equal((await request('import', importPayload('import-success'))).status, 400)
   check('Import uses native OAuth, reuses authenticated proxy, verifies all official settings and deduplicates request/email')
-  const direct = importPayload('import-direct', { outboundProxyId: '', settings: { ...payload.settings, enabled: false, notes: '', modelAccess: { mode: 'all', models: [] } } })
+  const direct = importPayload('import-direct', { outboundProxyId: '', settings: { ...payload.settings, enabled: false, notes: '', modelAccess: { mode: 'allowlist', models: ['codex-auto-review'] } } })
   assert.equal((await request('import', direct)).status, 200); const directDone = await finishImport(direct.requestId); assert.equal(directDone.status, 'success'); assert.equal(accounts.find(a => a.id === directDone.accountId).enabled, false)
-  check('Direct import and disabled scheduling preserve empty notes and unrestricted models')
-  for (const invalid of [{ settings: { ...payload.settings, weight: 101 } }, { settings: { ...payload.settings, concurrencyLimit: 0 } }, { settings: { ...payload.settings, modelAccess: { mode: 'allowlist', models: [] } } }, { outboundProxyId: 'unknown' }, { loginProxyUrl: 'http://wrong.example:21001' }]) {
+  check('Direct import and disabled scheduling preserve empty notes and a single allowed model')
+  for (const invalid of [{ settings: { ...payload.settings, weight: 101 } }, { settings: { ...payload.settings, concurrencyLimit: 0 } }, { settings: { ...payload.settings, modelAccess: { mode: 'allowlist', models: [] } } }, { settings: { ...payload.settings, modelAccess: { mode: 'all', models: [] } } }, { settings: { ...payload.settings, modelAccess: { mode: 'denylist', models: ['gpt-5'] } } }, { outboundProxyId: 'unknown' }, { loginProxyUrl: 'http://wrong.example:21001' }]) {
     const old = starts.length; assert.equal((await request('import', importPayload('import-invalid', invalid))).status, 400); assert.equal(starts.length, old)
   }
   check('Invalid scheduling, models, missing proxy and mismatched login proxy stop before OAuth')
