@@ -35,7 +35,7 @@ def tokens():
 class FallbackGuards(unittest.TestCase):
     def test_workspace_choices_are_bounded_ids_only(self):
         self.assertEqual(workspace_choices({"workspace_id": "other"}, "original-workspace"), [{"id": "other"}])
-        self.assertEqual(workspace_choices({"workspaces": [{"id": "original-workspace"}, {"id": "other", "name": "private-name", "token": "private-material"}]}, "original-workspace"), [{"id": "other"}])
+        self.assertEqual(workspace_choices({"workspaces": [{"id": "original-workspace"}, {"id": "other", "name": "private-name", "token": "private-material"}]}, "original-workspace"), [{"id": "other", "name": "private-name"}])
         for session in [None, {"workspaces": [{"id": "bad\nvalue"}]}, {"workspaces": [{"id": "x"}, {"id": "x"}]}, {"workspaces": [{"id": str(i)} for i in range(31)]}]:
             self.assertEqual(workspace_choices(session, "original-workspace"), [])
 

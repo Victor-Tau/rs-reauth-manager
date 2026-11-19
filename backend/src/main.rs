@@ -51,6 +51,8 @@ struct Job {
 #[derive(Clone, Serialize, Deserialize)]
 struct WorkspaceChoice {
     id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
 }
 impl Job {
     fn queued(request_id: String, account_id: String, automatic: bool) -> Self {
@@ -220,7 +222,14 @@ fn workspace_choices(output: &Value) -> Vec<WorkspaceChoice> {
         {
             return vec![];
         }
-        choices.push(WorkspaceChoice { id: id.into() });
+        let name = item["name"]
+            .as_str()
+            .map(|n| n.trim().chars().take(80).collect::<String>())
+            .filter(|n| !n.is_empty());
+        choices.push(WorkspaceChoice {
+            id: id.into(),
+            name,
+        });
     }
     choices
 }

@@ -22,7 +22,7 @@ function job(value: unknown): value is Job {
     && typeof value.status === 'string' && ['queued', 'running', 'success', 'failed', 'review', 'interrupted', 'cancelled'].includes(value.status)
     && nullableTime(value.startedAt) && nullableTime(value.finishedAt)
     && (value.kind === undefined || typeof value.kind === 'string' && ['', 'reauth', 'import', 'logout'].includes(value.kind))
-    && (value.workspaceChoices === undefined || Array.isArray(value.workspaceChoices) && value.workspaceChoices.length <= 30 && value.workspaceChoices.every(w => isRecord(w) && typeof w.id === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(w.id)))
+    && (value.workspaceChoices === undefined || Array.isArray(value.workspaceChoices) && value.workspaceChoices.length <= 30 && value.workspaceChoices.every(w => isRecord(w) && typeof w.id === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(w.id) && (w.name === undefined || typeof w.name === 'string' && w.name.length <= 80)))
     && (value.forceWorkspaceId === undefined || nullableString(value.forceWorkspaceId))
     && (value.logs === undefined || Array.isArray(value.logs) && value.logs.length <= 100 && value.logs.every(log => isRecord(log) && typeof log.at === 'number' && Number.isSafeInteger(log.at) && log.at >= 0 && typeof log.message === 'string' && log.message.length <= 1000))
 }

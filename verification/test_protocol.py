@@ -47,7 +47,8 @@ class OAuth:
     def authorize_external_oauth_url(self, *args, **kwargs):
         assert args[0] == URL
         assert kwargs["expected_state"] == "fixture"
-        kwargs["mfa_client"].get_mfa_code(timeout=5)
+        if kwargs["mfa_client"] is not None:
+            kwargs["mfa_client"].get_mfa_code(timeout=5)
         return self.result
 
 
@@ -250,6 +251,23 @@ class ProtocolTests(unittest.TestCase):
         OAuth.cookie = {"workspace_id": "other-workspace", "workspaces": [{"id": "other-workspace"}]}
         self.run_login()
         self.assertEqual(self.messages[-1], {"event": "error", "code": "workspace", "workspaces": [{"id": "other-workspace"}]})
+
+    def test_unbound_default_workspace_is_reselected_in_same_session(self):
+        OAuth.cookie = {"workspaces": [{"id": "original-workspace"}, {"id": "other-workspace"}]}
+        calls = []
+        original = OAuth.authorize_external_oauth_url
+
+        def authorize(oauth, *args, **kwargs):
+            calls.append(kwargs["mfa_client"] is None)
+            result = original(oauth, *args, **kwargs)
+            if len(calls) == 2:
+                oauth.bound_workspace = True
+            return result
+
+        with patch.object(OAuth, "authorize_external_oauth_url", authorize):
+            self.run_login()
+        self.assertEqual(calls, [False, True])
+        self.assertEqual(self.messages[-1]["event"], "complete")
 
     def test_ambiguous_workspaces_require_explicit_selection(self):
         OAuth.cookie = {"workspaces": [{"id": "original-workspace"}, {"id": "other-workspace"}]}

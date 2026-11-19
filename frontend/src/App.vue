@@ -148,7 +148,7 @@ const resultTone = (a: Account) => jobTone(resultOf(a))
       <p class="dialog-target">{{ forceTarget?.email || forceTarget?.name }}</p>
       <template v-if="forceSource?.workspaceChoices?.length">
         <p>请选择要写入原账号的其他工作区</p>
-        <ZSelect v-model="forceWorkspace" :options="forceSource.workspaceChoices.map(w => ({ value: w.id, label: w.id }))" aria-label="目标工作区" />
+        <ZSelect v-model="forceWorkspace" :options="forceSource.workspaceChoices.map(w => ({ value: w.id, label: w.name ? `${w.name}（${w.id}）` : w.id }))" aria-label="目标工作区" />
         <Notice tone="danger">将重新登录并替换原账号的工作区及授权，套餐以新授权为准，写回前会停止该账号调度</Notice>
         <p class="muted">仍需验证同一邮箱和用户，保留分组、代理、备注及其他配置，不显示 RT</p>
         <ZCheckbox v-model="forceConfirmed" class="force-confirm" :disabled="busy" label="我确认使用所选工作区的 RT 替换原授权，并停止该账号调度" />

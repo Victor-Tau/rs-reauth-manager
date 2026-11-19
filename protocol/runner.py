@@ -253,7 +253,7 @@ def run(data):
     oauth.session = chat.session
     try:
         emit("step", step="login")
-        def authorize(url, expected):
+        def authorize(url, expected, resume=False):
             def attempt(*, session_only=False):
                 try:
                     return oauth.authorize_external_oauth_url(url, chat, expected_state=expected, user_agent=chat.ua, impersonate=chat.impersonate, email=email, password='' if session_only else password, mfa_client=None if session_only else ProgressMfa(secret), max_hops=20)
@@ -264,8 +264,16 @@ def run(data):
             oauth.failed_authorization = None
             oauth.mfa_verified = False
             oauth.phone_required = False
-            result = attempt()
-            if isinstance(result, dict) and result.get('ok') is not True and oauth.phone_required and oauth.mfa_verified:
+            if resume:
+                # Same host-owned flow in the already verified session; never replays credentials
+                oauth.session_continuation = True
+                try:
+                    result = attempt(session_only=True)
+                finally:
+                    oauth.session_continuation = False
+            else:
+                result = attempt()
+            if not resume and isinstance(result, dict) and result.get('ok') is not True and oauth.phone_required and oauth.mfa_verified:
                 # Continue only the same host-owned OAuth flow in the verified session
                 # A second phone step or login challenge stops without replaying credentials
                 oauth.trace('authorization_resume', stage='authorize')
@@ -311,6 +319,19 @@ def run(data):
                 return
             if result.get("state") != state or not result.get("code"):
                 raise ValueError("state")
+            if not oauth.workspace_matches() and not importing and not forced:
+                session = oauth._decode_oauth_session_cookie() or {}
+                listed = [w.get("id") for w in session.get("workspaces", []) if isinstance(w, dict)] if isinstance(session.get("workspaces"), list) else []
+                if target in listed:
+                    # Upstream issued a code for its default workspace; ask it again with the original one selected
+                    oauth.trace('workspace_reselect', stage='workspace', listed=len(listed))
+                    oauth.bound_workspace = False
+                    retry = authorize(authorize_url, state, resume=True)
+                    if isinstance(retry, dict) and retry.get("ok") is True and retry.get("state") == state and retry.get("code"):
+                        result = retry
+                    else:
+                        emit('error', **(oauth.failed_authorization or describe_failure(retry, attempt=oauth.last_attempt)))
+                        return
             if not oauth.workspace_matches():
                 if importing:
                     raise ValueError("workspace")

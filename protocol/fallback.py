@@ -122,6 +122,14 @@ def recover_unbound_free(oauth, chat, authorize_url, data, authorize):
     return verified, workspace
 
 
+def _choice(value, item=None):
+    choice = {"id": value}
+    name = item.get("name") or item.get("display_name") or item.get("title") if isinstance(item, dict) else None
+    if isinstance(name, str) and name.strip():
+        choice["name"] = name.strip()[:80]
+    return choice
+
+
 def workspace_choices(session, original):
     if not isinstance(session, dict):
         return []
@@ -136,12 +144,12 @@ def workspace_choices(session, original):
         if not isinstance(value, str) or not 0 < len(value) <= 128 or not all(c.isascii() and (c.isalnum() or c in "_-") for c in value):
             return []
         if value != original:
-            result.append({"id": value})
+            result.append(_choice(value, item))
     if len({item["id"] for item in result}) != len(result) or len(result) > 30:
         return []
     selected = session.get("workspace_id")
     if selected and selected != original and selected not in {item["id"] for item in result}:
         if not isinstance(selected, str) or not 0 < len(selected) <= 128 or not all(c.isascii() and (c.isalnum() or c in "_-") for c in selected) or len(result) >= 30:
             return []
-        result.append({"id": selected})
+        result.append(_choice(selected))
     return result
