@@ -94,6 +94,7 @@ def run(data):
     from vendor.lib.chatgpt_client import ChatGPTClient
     from vendor.lib.oauth_client import OAuthClient
     from totp import TotpMfaClient
+    from login_flow import LoginFlowMixin
     from fallback import WorkspaceUnavailable, personal_candidate, recover_free, recover_unbound_free, workspace_choices
 
     target = str(data.get("accountId") or "")
@@ -105,7 +106,7 @@ def run(data):
     class PhoneVerificationRequired(RuntimeError):
         pass
 
-    class BoundOAuthClient(OAuthClient):
+    class BoundOAuthClient(LoginFlowMixin, OAuthClient):
         bound_workspace = False
         selected_workspace = forced or target
         workspace_candidates = []
@@ -120,7 +121,7 @@ def run(data):
             emit('diagnostic', entry={'action': action, **fields})
 
         def _oauth_complete_totp_mfa_for_continue(self, **kwargs):
-            if self.session_continuation:
+            if self.session_continuation or self.mfa_verified:
                 self.last_oauth_error = 'session_login_required'
                 return ''
             next_url = super()._oauth_complete_totp_mfa_for_continue(**kwargs)
@@ -255,12 +256,18 @@ def run(data):
     oauth = BoundOAuthClient({"oauth_phone_strategy": "sms", "sub2api_oauth_max_hops": 20, "oauth_email_otp_max_attempts": 1, "oauth_email_otp_timeout": 30, "sub2api_oauth_impersonates": "chrome133a", "sub2api_redirect_uri": urlunsplit(redirect)}, proxy=proxy or None, verbose=False)
     oauth.session.close()
     oauth.session = chat.session
+    import requests
+    if isinstance(chat.session, requests.Session):
+        chat.session.mount("https://", requests.adapters.HTTPAdapter(max_retries=0))
+    oauth.login_email, oauth.login_password = email, password
+    oauth.login_device_id = getattr(chat, "device_id", "")
+    oauth.login_user_agent, oauth.login_impersonate = chat.ua, chat.impersonate
     try:
         emit("step", step="login")
         def authorize(url, expected, resume=False):
             def attempt(*, session_only=False):
                 try:
-                    return oauth.authorize_external_oauth_url(url, chat, expected_state=expected, user_agent=chat.ua, impersonate=chat.impersonate, email=email, password='' if session_only else password, mfa_client=None if session_only else ProgressMfa(secret), max_hops=20)
+                    return oauth.authorize_external_oauth_url(url, chat, expected_state=expected, user_agent=chat.ua, impersonate=chat.impersonate, email=email, password='' if session_only else password, mfa_client=None if session_only else ProgressMfa(secret, max_attempts=1), max_hops=20)
                 except PhoneVerificationRequired:
                     return {'ok': False, 'error': 'phone_required'}
 

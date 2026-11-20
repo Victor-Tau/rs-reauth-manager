@@ -256,7 +256,6 @@ impl Runtime {
                             Some("login") => "login",
                             Some("mfa") => "mfa",
                             Some("logout") => "logout",
-                            Some("email_login_code") => "email_login_code",
                             Some("email_code") => "email_code",
                             Some("email_begin") => "email_begin",
                             Some("email_verify") => "email_verify",

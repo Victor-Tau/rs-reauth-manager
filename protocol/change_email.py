@@ -8,6 +8,8 @@ from runner import parse_notes
 from totp import TotpMfaClient
 from vendor.lib.chatgpt_client import ChatGPTClient
 from vendor.lib.oauth_client import OAuthClient
+from vendor.lib.sentinel_token import build_sentinel_token
+from login_flow import LoginFlowMixin
 
 BASE = "https://chatgpt.com"
 CLIENT_ID = "TdJIcbe16WoTHtN95nyywh5E4yOo6ItG"
@@ -22,17 +24,64 @@ def read_code(emit, step):
     return code
 
 
-class ManualMail:
-    def __init__(self, emit):
-        self.emit = emit
+class WebOAuth(LoginFlowMixin, OAuthClient):
+    password_attempted = False
+    password_verified = False
+    mfa_verified = False
 
-    def wait_for_verification_code(self, *args, **kwargs):
-        return read_code(self.emit, "email_login_code")
+    def _oauth_request(self, method, url, **kwargs):
+        safe_url(url)
+        if urlsplit(url).path == "/api/accounts/password/verify":
+            if self.password_attempted:
+                raise ValueError("login")
+            self.password_attempted = True
+        response = super()._oauth_request(method, url, **kwargs)
+        if urlsplit(url).path == "/api/accounts/password/verify" and response.status_code == 200:
+            self.password_verified = True
+        return response
 
+    def _oauth_complete_totp_mfa_for_continue(self, **kwargs):
+        if not self.password_verified or self.mfa_verified:
+            raise ValueError("login")
+        self.emit("step", step="mfa")
+        result = super()._oauth_complete_totp_mfa_for_continue(**kwargs)
+        if result and not self.last_oauth_error:
+            self.mfa_verified = True
+        else:
+            raise ValueError("email_login_mfa_rejected")
+        return result
 
-class WebOAuth(OAuthClient):
+    def _oauth_complete_email_otp_for_continue(self, **kwargs):
+        # Never select email OTP as a substitute for the supplied password and TOTP
+        raise ValueError("email_login_human")
+
     def _oauth_complete_add_phone_for_continue(self, *args, **kwargs):
         raise ValueError("phone")
+
+    def verify_password(self, password, current_url):
+        token = build_sentinel_token(self.session, self.device_id, flow="password_verify",
+                                     user_agent=self.user_agent, impersonate=self.impersonate)
+        if not token:
+            raise ValueError("login")
+        response = self._oauth_request(
+            "POST", self.oauth_issuer + "/api/accounts/password/verify",
+            json={"password": password}, allow_redirects=False, timeout=30,
+            impersonate=self.impersonate,
+            headers={"Accept": "application/json", "Content-Type": "application/json",
+                     "Origin": self.oauth_issuer, "Referer": self.oauth_issuer + "/",
+                     "oai-device-id": self.device_id, "User-Agent": self.user_agent,
+                     "openai-sentinel-token": token},
+        )
+        if response.status_code != 200:
+            raise ValueError("email_login_password_rejected")
+        data = response.json()
+        next_url = safe_url(urljoin(current_url, self._extract_continue_url_from_json(data)))
+        if self._is_mfa_challenge(data=data, continue_url=next_url):
+            return self._oauth_complete_totp_mfa_for_continue(
+                device_id=self.device_id, user_agent=self.user_agent, impersonate=self.impersonate,
+                mfa_client=self.mfa_client, current_url=next_url, response_data=data,
+            )
+        return next_url
 
 
 def safe_url(value):
@@ -66,21 +115,33 @@ def web_login(chat, email, password, secret, emit):
     # OAuthClient's constructor creates a session that is not used here
     oauth.session.close()
     oauth.session = chat.session
-    mail = ManualMail(emit)
-    next_url = oauth._oauth_drive_external_login_for_continue(
-        email=email, password=password, current_url=current,
-        device_id=chat.device_id, user_agent=chat.ua, impersonate=chat.impersonate,
-        mail_client=mail, mfa_client=TotpMfaClient(secret, max_attempts=1),
-    )
+    oauth.device_id, oauth.user_agent, oauth.impersonate = chat.device_id, chat.ua, chat.impersonate
+    oauth.login_email, oauth.login_password = email, password
+    oauth.login_device_id, oauth.login_user_agent, oauth.login_impersonate = chat.device_id, chat.ua, chat.impersonate
+    oauth.mfa_client, oauth.emit = TotpMfaClient(secret, max_attempts=1), emit
+    if urlsplit(current).path in {"/email-verification", "/log-in/password"}:
+        next_url = oauth.verify_password(password, current)
+    elif urlsplit(current).path == "/log-in":
+        next_url = oauth._oauth_drive_external_login_for_continue(
+            email=email, password=password, current_url=current,
+            device_id=chat.device_id, user_agent=chat.ua, impersonate=chat.impersonate,
+            mail_client=None, mfa_client=oauth.mfa_client,
+        )
+    else:
+        raise ValueError("login")
     for _ in range(20):
         if not next_url:
             raise ValueError("login")
         current = safe_url(urljoin(current, next_url))
+        if urlsplit(current).netloc == "auth.openai.com" and urlsplit(current).path in {"/email-verification", "/log-in/password"}:
+            if oauth.password_attempted:
+                raise ValueError("email_login_human")
+            next_url = oauth.verify_password(password, current)
+            continue
         if "mfa-challenge" in urlsplit(current).path:
-            emit("step", step="mfa")
             next_url = oauth._oauth_complete_totp_mfa_for_continue(
                 device_id=chat.device_id, user_agent=chat.ua, impersonate=chat.impersonate,
-                mfa_client=TotpMfaClient(secret, max_attempts=1), current_url=current,
+                mfa_client=oauth.mfa_client, current_url=current,
             )
             continue
         response = chat.session.get(current, allow_redirects=False, timeout=30)
@@ -94,6 +155,8 @@ def web_login(chat, email, password, secret, emit):
         # Unknown consent, phone or security pages need an explicit supported flow
         raise ValueError("login")
     else:
+        raise ValueError("login")
+    if not oauth.password_verified or not oauth.mfa_verified:
         raise ValueError("login")
     response = chat.session.get(BASE + "/api/auth/session", allow_redirects=False, timeout=30)
     session = response.json() if response.status_code == 200 else {}
@@ -137,8 +200,11 @@ def run_change_email(data, emit):
                 emit("error", code="email_" + operation + "_rejected", httpStatus=response.status_code)
                 return
         emit("email_complete")
-    except Exception:
+    except Exception as exc:
         # A lost verify response may already have changed the remote email
-        emit("error", code="email_verify_uncertain" if stage == "verify" else "email_" + stage + "_failed")
+        code = "email_verify_uncertain" if stage == "verify" else "email_" + stage + "_failed"
+        if stage == "login" and isinstance(exc, ValueError) and str(exc) in {"email_login_human", "email_login_password_rejected", "email_login_mfa_rejected"}:
+            code = str(exc)
+        emit("error", code=code)
     finally:
         chat.session.close()

@@ -26,7 +26,7 @@ const records = ref<EmailChangeRecord[]>([]), busy = ref(false), loading = ref(f
 const revealed = ref(''), revealId = ref(''), deleteId = ref('')
 const showDelete = computed({ get: () => !!deleteId.value, set: value => { if (!value) deleteId.value = '' } })
 const active = computed(() => records.value.find(r => ['running', 'verifying'].includes(r.status)))
-const waiting = computed(() => active.value && ['email_login_code', 'email_code'].includes(active.value.step) && active.value.status === 'running')
+const waiting = computed(() => active.value?.step === 'email_code' && active.value.status === 'running')
 const queueActive = computed(() => props.jobs.some(isActive))
 const statusLabels: Record<string, string> = { running: '进行中', verifying: '正在确认', success: '换绑成功', failed: '未完成', review: '需要核对', interrupted: '已中断', cancelled: '已取消' }
 let timer: ReturnType<typeof setTimeout> | undefined
@@ -128,7 +128,7 @@ onUnmounted(() => { disposed = true; clearTimeout(timer); password.value = ''; s
 
 <template>
   <section class="settings-page" aria-label="账户邮箱换绑">
-    <div><h2 class="page-title">账户邮箱换绑</h2><p class="muted">使用原邮箱、密码与 2FA 登录，将账户换绑到新邮箱，邮箱验证码由你手动输入</p></div>
+    <div><h2 class="page-title">账户邮箱换绑</h2><p class="muted">使用原邮箱、密码与 2FA 登录，将账户换绑到新邮箱，新邮箱换绑验证码由你手动输入</p></div>
     <Notice v-if="!props.enabled" tone="warning">请先开启页面顶部的插件总开关</Notice>
     <Notice v-if="error" tone="danger" role="alert">{{ error }}</Notice>
     <Notice v-if="queueActive" tone="info">授权队列正在处理，请等待队列结束后发起换绑</Notice>
@@ -145,8 +145,8 @@ onUnmounted(() => { disposed = true; clearTimeout(timer); password.value = ''; s
         <p>{{ active.email }} → {{ active.newEmail }}</p>
         <Notice :tone="active.status === 'verifying' ? 'warning' : 'info'" role="status">{{ active.message }}</Notice>
         <form v-if="waiting" autocomplete="off" @submit.prevent="confirmCode">
-          <label class="field-label">{{ active.step === 'email_login_code' ? '原邮箱登录验证码' : '新邮箱换绑验证码' }}<ZInput v-model="code" :maxlength="6" autocomplete="one-time-code" inputmode="numeric" :disabled="busy || !props.enabled" aria-label="邮箱验证码" /></label>
-          <ZButton type="primary" :disabled="busy || !props.enabled" :loading="busy" @click="confirmCode">{{ active.step === 'email_login_code' ? '提交登录验证码' : '确认换绑并保存资料' }}</ZButton>
+          <label class="field-label">新邮箱换绑验证码<ZInput v-model="code" :maxlength="6" autocomplete="one-time-code" inputmode="numeric" :disabled="busy || !props.enabled" aria-label="邮箱验证码" /></label>
+          <ZButton type="primary" :disabled="busy || !props.enabled" :loading="busy" @click="confirmCode">确认换绑并保存资料</ZButton>
         </form>
         <div class="form-actions"><ZButton :disabled="busy" @click="cancel">取消会话</ZButton><span class="muted">会话最长 15 分钟，刷新页面后可继续输入，插件重启后会话结束</span></div>
       </div>

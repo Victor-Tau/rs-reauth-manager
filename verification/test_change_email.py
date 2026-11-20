@@ -20,7 +20,8 @@ SECRET = "GEZDGNBVGY3TQOJQ"
 
 class EmailChangeTests(unittest.TestCase):
     def execute(self, *, begin=(200, {"success": True}), verify=(200, {"success": True}),
-                identity=EMAIL, codes='{"code":"445566"}\n', redirect=None, phone=False, login_mail=False):
+                identity=EMAIL, codes='{"code":"445566"}\n', redirect=None, phone=False, login_mail=False,
+                password_status=200, mfa_status=200, password_error=None, mfa_sentinel=True, mfa_redirect=None):
         calls, messages, sessions = [], [], []
 
         class Session:
@@ -40,22 +41,28 @@ class EmailChangeTests(unittest.TestCase):
                 elif url.endswith("/api/auth/signin/openai"):
                     body = {"url": "https://auth.openai.com/oauth/authorize?state=private-state"}
                 elif "/oauth/authorize?" in url:
-                    status, headers = 302, {"Location": redirect or "https://auth.openai.com/log-in"}
+                    status, headers = 302, {"Location": redirect or "https://auth.openai.com/email-verification"}
                 elif url.endswith("/api/accounts/authorize/continue"):
                     body = {"page": {"type": "login_password"}, "continue_url": "/log-in/password"}
                 elif url.endswith("/api/accounts/password/verify"):
                     assert kw["json"] == {"password": "private-password"}
+                    assert kw['headers']['openai-sentinel-token'] == 'private-sentinel-password_verify'
+                    if password_error:
+                        raise password_error
+                    status = password_status
                     if phone:
                         body = {"page": {"type": "add_phone"}, "continue_url": "/add-phone"}
                     elif login_mail:
                         body = {"page": {"type": "email_otp_verification"}, "continue_url": "/email-verification"}
                     else:
-                        body = {"page": {"type": "mfa_challenge"}, "continue_url": "/mfa-challenge/fixture-factor", "factors": [{"id": "fixture-factor", "type": "totp"}]}
+                        body = {"page": {"type": "mfa_challenge", "payload": {"factor_id": "fixture-factor", "factors": [{"id": "fixture-factor", "factor_type": "totp"}]}}, "continue_url": "/mfa-challenge/fixture-factor"}
                 elif url.endswith("/api/accounts/mfa/issue_challenge"):
                     pass
                 elif url.endswith("/api/accounts/mfa/verify"):
                     assert kw["json"]["code"] == "123456"
-                    body = {"continue_url": "https://auth.openai.com/api/accounts/authorize/callback"}
+                    assert kw['headers']['openai-sentinel-token'] == 'private-sentinel-verify_mfa'
+                    status = mfa_status
+                    body = {"continue_url": mfa_redirect or "https://chatgpt.com/api/auth/callback/openai?code=private-code&state=private-state", "page": {"type": "external_url"}}
                 elif url.endswith("/api/accounts/authorize/callback"):
                     status, headers = 302, {"Location": "https://chatgpt.com/api/auth/callback/openai?code=private-code&state=private-state"}
                 elif "/api/auth/callback/openai?" in url:
@@ -68,12 +75,7 @@ class EmailChangeTests(unittest.TestCase):
                     if isinstance(verify, Exception):
                         raise verify
                     status, body = verify
-                elif url.endswith("/api/accounts/email-otp/resend"):
-                    pass
-                elif url.endswith("/api/accounts/email-otp/validate"):
-                    assert kw["json"] == {"code": "112233"}
-                    body = {"continue_url": "https://auth.openai.com/api/accounts/authorize/callback"}
-                elif url.endswith(("/log-in", "/log-in/password", "/mfa-challenge/fixture-factor")):
+                elif url.endswith(("/log-in", "/log-in/password", "/mfa-challenge/fixture-factor", "/email-verification")):
                     pass
                 else:
                     raise AssertionError("Unexpected offline request " + method + " " + url)
@@ -91,13 +93,16 @@ class EmailChangeTests(unittest.TestCase):
         data = {"mode": "change_email", "email": EMAIL, "notes": f"{EMAIL}----private-password----{SECRET}", "newEmail": NEW, "proxy": "socks5://fixture:pass@127.0.0.1:21001"}
         with patch.object(chatgpt_client, "create_http_session", side_effect=lambda **kw: Session()) as create_chat, \
              patch.object(oauth_client, "create_http_session", side_effect=lambda **kw: Session()), \
-             patch.object(oauth_client, "build_sentinel_token", return_value="private-sentinel"), \
+             patch.object(oauth_client, "build_sentinel_token", side_effect=lambda *args, **kwargs: (None if not mfa_sentinel and kwargs['flow'] == 'verify_mfa' else 'private-sentinel-' + kwargs['flow'])), \
+             patch.object(change_email, "build_sentinel_token", side_effect=lambda *args, **kwargs: (None if not mfa_sentinel and kwargs['flow'] == 'verify_mfa' else 'private-sentinel-' + kwargs['flow'])), \
              patch.object(change_email.TotpMfaClient, "get_mfa_code", return_value="123456"), \
              patch.object(sys, "stdin", io.StringIO(codes)), \
              patch.object(runner, "emit", side_effect=lambda event, **fields: messages.append({"event": event, **fields})):
             runner.run(data)
         self.assertTrue(all(s is sessions[0] for s, _, _, _ in calls))
         self.assertTrue(all(s.closed for s in sessions))
+        self.assertFalse(any('passwordless/' in url or 'email-otp/' in url for _, _, url, _ in calls))
+        self.assertFalse(any(m.get('step') == 'email_login_code' for m in messages))
         self.assertEqual(create_chat.call_args.kwargs["proxy"], data["proxy"].replace("socks5://", "socks5h://"))
         encoded = json.dumps(messages)
         for value in [SECRET, "private-", "445566", "112233", "fixture:pass"]:
@@ -119,11 +124,41 @@ class EmailChangeTests(unittest.TestCase):
         self.assertEqual(sum(url.endswith("/password/verify") for _, _, url, _ in calls), 1)
         self.assertEqual(sum(url.endswith("/mfa/verify") for _, _, url, _ in calls), 1)
 
-    def test_login_email_otp_is_manual_and_distinct_from_new_email_code(self):
-        messages, _ = self.execute(login_mail=True, codes='{"code":"112233"}\n{"code":"445566"}\n')
-        self.assertEqual(messages[-1]["event"], "email_complete")
-        steps = [m.get("step") for m in messages]
-        self.assertLess(steps.index("email_login_code"), steps.index("email_code"))
+    def test_captured_email_verification_landing_switches_to_password_then_totp(self):
+        messages, calls = self.execute()
+        self.assertEqual(messages[-1]['event'], 'email_complete')
+        endpoints = [url.split('?')[0] for _, _, url, _ in calls]
+        self.assertIn('https://auth.openai.com/email-verification', endpoints)
+        self.assertNotIn('https://auth.openai.com/api/accounts/authorize/continue', endpoints)
+        self.assertLess(endpoints.index('https://auth.openai.com/api/accounts/password/verify'), endpoints.index('https://auth.openai.com/api/accounts/mfa/verify'))
+        self.assertEqual([m.get('step') for m in messages if m.get('step') in {'email_login_code', 'email_code'}], ['email_code'])
+
+    def test_explicit_password_page_and_normal_login_page_still_use_password_and_totp(self):
+        for path in ['/log-in/password', '/log-in']:
+            messages, calls = self.execute(redirect='https://auth.openai.com' + path)
+            self.assertEqual(messages[-1]['event'], 'email_complete')
+            self.assertEqual(sum(url.endswith('/password/verify') for _, _, url, _ in calls), 1)
+            self.assertEqual(sum(url.endswith('/mfa/verify') for _, _, url, _ in calls), 1)
+
+    def test_post_password_email_requirement_stops_without_fallback_or_replay(self):
+        messages, calls = self.execute(login_mail=True)
+        self.assertEqual(messages[-1], {'event': 'error', 'code': 'email_login_human'})
+        self.assertEqual(sum(url.endswith('/password/verify') for _, _, url, _ in calls), 1)
+        self.assertFalse(any('/change_email/' in url for _, _, url, _ in calls))
+
+    def test_password_rejected_and_timeout_do_not_fallback_or_retry(self):
+        for args in [{'password_status': 401}, {'password_status': 429}, {'password_error': TimeoutError('private-password')}]:
+            messages, calls = self.execute(**args)
+            self.assertEqual(messages[-1]['event'], 'error')
+            self.assertEqual(sum(url.endswith('/password/verify') for _, _, url, _ in calls), 1)
+            self.assertFalse(any('/mfa/verify' in url or '/change_email/' in url for _, _, url, _ in calls))
+
+    def test_mfa_rejection_missing_sentinel_or_extra_challenge_stops_before_change(self):
+        for args in [{'mfa_status': 403}, {'mfa_status': 429}, {'mfa_sentinel': False}, {'mfa_redirect': '/mfa-challenge/fixture-factor'}, {'mfa_redirect': 'https://attacker.invalid/'}]:
+            messages, calls = self.execute(**args)
+            self.assertEqual(messages[-1]['event'], 'error')
+            self.assertLessEqual(sum(url.endswith('/mfa/verify') for _, _, url, _ in calls), 1)
+            self.assertFalse(any('/change_email/' in url or 'attacker.invalid' in url for _, _, url, _ in calls))
 
     def test_wrong_identity_phone_and_external_redirect_stop_before_change(self):
         for args in [{"identity": "someone@example.com"}, {"phone": True}, {"redirect": "https://attacker.invalid/"}]:

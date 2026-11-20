@@ -328,6 +328,15 @@ pub async fn tick(manager: &mut Manager, host: &HostClient) -> Result<(), Plugin
                 "email_begin_rejected" => "发送换绑验证码被拒绝，请检查新邮箱及账号换绑资格",
                 "email_verify_rejected" => "上游未确认换绑成功，请核对验证码及新旧邮箱状态",
                 "email_verify_uncertain" => "确认请求结果不确定，请检查新旧邮箱，不会自动重试",
+                "email_login_mfa_rejected" => {
+                    "2FA 验证流程未完成，已停止换绑，未自动回退到邮箱验证码登录"
+                }
+                "email_login_human" => {
+                    "密码验证后上游仍要求额外邮箱验证，已停止换绑，未自动回退到邮箱验证码登录"
+                }
+                "email_login_password_rejected" => {
+                    "上游未通过密码验证，已停止换绑，未自动回退到邮箱验证码登录"
+                }
                 _ => "登录或发送验证码失败，可能需要额外验证，请核对账号和代理",
             }
             .into();
@@ -350,7 +359,6 @@ pub async fn tick(manager: &mut Manager, host: &HostClient) -> Result<(), Plugin
         true
     } else {
         record.message = match record.step.as_str() {
-            "email_login_code" => "请手动输入原邮箱收到的登录验证码",
             "email_code" => "换绑验证码已发送，请输入新邮箱收到的验证码",
             "email_verify" => "正在提交换绑确认，请等待结果",
             "email_begin" => "正在发送新邮箱换绑验证码",
@@ -433,7 +441,7 @@ pub async fn action(
         .map_err(|_| fault("换绑状态读取失败"))?
         .step
         .clone();
-    if !["email_code", "email_login_code"].contains(&step.as_str())
+    if step != "email_code"
         || records[index].step == "code_submitted"
         || records[index].status == "verifying"
     {

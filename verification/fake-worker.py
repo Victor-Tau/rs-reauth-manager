@@ -13,9 +13,6 @@ if data.get("mode") == "change_email":
     assert data["proxy"] == "http://fixture:pass@127.0.0.1:21001"
     assert data["newEmail"].endswith("@example.com")
     assert "fixture-password" in data["notes"]
-    if data["email"].startswith("email_login"):
-        print(json.dumps({"event": "step", "step": "email_login_code"}), flush=True)
-        assert json.loads(sys.stdin.readline())["code"] == "112233"
     print(json.dumps({"event": "step", "step": "email_code"}), flush=True)
     assert json.loads(sys.stdin.readline())["code"] == "445566"
     if data["email"].startswith("email_lost"):

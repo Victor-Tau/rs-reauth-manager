@@ -29,6 +29,7 @@ verification/*
 !verification/test_logout.py
 !verification/test_consent.py
 !verification/test_change_email.py
+!verification/test_codex_login.py
 
 !verification/release-smoke.mjs
 !verification/rpc-scheduler.mjs
