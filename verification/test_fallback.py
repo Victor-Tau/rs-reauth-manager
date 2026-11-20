@@ -15,7 +15,7 @@ from urllib.parse import parse_qs, urlsplit
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "protocol"))
 import runner
 from fallback import personal_candidate, verify_free_tokens, workspace_choices
-from test_protocol import EMAIL, SECRET, URL, desktop_url
+from test_protocol import EMAIL, SECRET, desktop_url
 from requests.cookies import RequestsCookieJar
 from vendor.lib import chatgpt_client, oauth_client
 
@@ -129,9 +129,9 @@ class RealVendorFreeRecovery(unittest.TestCase):
                 testcase.assertEqual(urlsplit(url).netloc, "auth.openai.com")
                 calls.append((method, url))
                 params = parse_qs(urlsplit(url).query)
-                if url == URL and selection_page:
+                if len(calls) == 1 and selection_page:
                     return types.SimpleNamespace(status_code=200, url="https://auth.openai.com/workspace", headers={}, text="workspaces", json=lambda: {})
-                state = "wrong" if bad_state and url != URL else params["state"][0]
+                state = "wrong" if bad_state and (original or force or len(calls) > 1) else params["state"][0]
                 return types.SimpleNamespace(status_code=302, url=url, headers={"Location": f"http://127.0.0.1:1455/auth/callback?state={state}&code=fixture-code"}, text="")
 
             def post(self, url, **kwargs):
@@ -157,13 +157,13 @@ class RealVendorFreeRecovery(unittest.TestCase):
         with patch.object(chatgpt_client, "create_http_session", side_effect=session), patch.object(oauth_client, "create_http_session", side_effect=session), patch.object(socket, "create_connection", side_effect=AssertionError("Network forbidden")), patch.object(runner, "emit", side_effect=lambda event, **fields: messages.append({"event": event, **fields})):
             runner.run(data)
 
-    def test_no_workspace_metadata_verifies_original_with_separate_pkce(self):
+    def test_no_workspace_metadata_verifies_first_callback_with_its_pkce(self):
         self.execute(original=True)
         result = self.messages[-1]
         self.assertEqual(result['event'], 'original_workspace')
         self.assertEqual(result['workspaceId'], 'original-workspace')
         self.assertEqual(result['originalWorkspaceId'], 'original-workspace')
-        self.assertEqual(len(self.calls), 3)
+        self.assertEqual([method for method, _ in self.calls], ['GET', 'POST'])
         self.assertTrue(any(m.get('entry', {}).get('action') == 'original_verify' for m in self.messages))
         self.assertNotIn('fixture-private-rt', json.dumps(self.messages[:-1]))
         self.assertFalse(any(m['event'] == 'complete' for m in self.messages))
@@ -187,6 +187,9 @@ class RealVendorFreeRecovery(unittest.TestCase):
         self.assertEqual(result["originalWorkspaceId"], "original-workspace")
         self.assertIs(result["originalWorkspaceUnavailable"], True)
         self.assertEqual(len(self.calls), 3)
+        first, second = [parse_qs(urlsplit(url).query) for method, url in self.calls if method == 'GET']
+        self.assertNotEqual(first['state'], second['state'])
+        self.assertNotEqual(first['code_challenge'], second['code_challenge'])
         self.assertNotIn("fixture-private-rt", json.dumps(self.messages[:-1]))
         self.assertFalse(any(message["event"] == "complete" for message in self.messages))
 
@@ -210,7 +213,7 @@ class RealVendorFreeRecovery(unittest.TestCase):
     def test_wrong_new_state_never_exchanges_or_emits_tokens(self):
         self.execute(bad_state=True)
         self.assertEqual(self.messages[-1]['event'], 'error')
-        self.assertFalse(any(call[0] == "POST" for call in self.calls))
+        self.assertEqual([method for method, _ in self.calls], ['GET', 'GET'])
         self.assertFalse(any(message["event"] == "free_fallback" for message in self.messages))
 
     def test_missing_original_identity_prevents_new_authorization(self):

@@ -1,4 +1,6 @@
 """Sanitized fixtures for the current Team and Plus/Pro Codex login captures."""
+import base64
+import hashlib
 import json
 from pathlib import Path
 import socket
@@ -26,14 +28,16 @@ class CodexLoginTests(unittest.TestCase):
             {"id": "team-workspace", "name": "Example Team", "kind": "organization"},
             {"id": "personal-workspace", "name": None, "kind": "personal"},
         ]
-        callback = f"http://127.0.0.1:1455/auth/callback?code=private-code&state={state}"
         consent = "https://auth.openai.com/sign-in-with-chatgpt/codex/consent"
+        testcase = self
 
         class Session:
             def __init__(self):
                 self.cookies, self.headers = RequestsCookieJar(), {}
                 self.closed = False
                 self.authorizations = 0
+                self.callback = f"http://127.0.0.1:1455/auth/callback?code=private-code&state={state}"
+                self.code_challenge = None
                 sessions.append(self)
                 if cookie:
                     self.cookies.set("oai-client-auth-session", json.dumps({"workspace_id": "stale-workspace", "workspaces": [{"id": "stale-workspace"}]}), domain="auth.openai.com")
@@ -47,15 +51,22 @@ class CodexLoginTests(unittest.TestCase):
             def request(self, method, url, **kwargs):
                 calls.append((self, method, url, kwargs))
                 body, status, headers = {}, 200, {"Content-Type": "application/json"}
-                if verify_original and method == 'GET' and url.startswith('https://auth.openai.com/oauth/authorize?') and url != URL:
-                    fresh_state = parse_qs(urlsplit(url).query)['state'][0]
-                    status, headers = 302, {'Location': f'http://127.0.0.1:1455/auth/callback?code=fresh-private-code&state={fresh_state}'}
-                elif verify_original and method == 'POST' and url.endswith('/oauth/token'):
+                if verify_original and method == 'POST' and url.endswith('/oauth/token'):
+                    challenge = base64.urlsafe_b64encode(hashlib.sha256(kwargs['data']['code_verifier'].encode()).digest()).decode().rstrip('=')
+                    testcase.assertEqual(challenge, self.code_challenge)
+                    testcase.assertEqual(kwargs['data']['code'], 'private-code')
                     payload = {'sub': 'original-subject', 'email': EMAIL, 'exp': int(time.time()) + 3600, 'https://api.openai.com/auth': {'chatgpt_account_id': token_workspace or target, 'chatgpt_user_id': 'original-user', 'chatgpt_plan_type': plan}}
                     token = jwt(payload)
                     body = {'id_token': token, 'access_token': token, 'refresh_token': 'private-fresh-refresh'}
-                elif method == "GET" and url == URL:
+                elif method == "GET" and (url == URL or verify_original and url.startswith('https://auth.openai.com/oauth/authorize?')):
                     self.authorizations += 1
+                    if verify_original and self.authorizations == 1:
+                        params = parse_qs(urlsplit(url).query)
+                        testcase.assertNotEqual(params['state'], ['fixture'])
+                        self.code_challenge = params['code_challenge'][0]
+                        testcase.assertNotEqual(self.code_challenge, 'a' * 43)
+                        if state == 'fixture':
+                            self.callback = f"http://127.0.0.1:1455/auth/callback?code=private-code&state={params['state'][0]}"
                     status, headers = (307, {"Location": desktop_url()}) if bounce and self.authorizations == 1 else (302, {"Location": "https://auth.openai.com" + landing})
                 elif method == "GET" and url == desktop_url():
                     status, headers = 302, {"Location": URL}
@@ -84,7 +95,7 @@ class CodexLoginTests(unittest.TestCase):
                     snapshot = {"email": session_email, "email_verified": True}
                     if plan == "team" or target:
                         snapshot["workspaces"] = choices
-                    body = {"continue_url": consent if plan == "team" else callback,
+                    body = {"continue_url": consent if plan == "team" else self.callback,
                             "page": {"type": "sign_in_with_chatgpt_codex_consent" if plan == "team" else "external_url"},
                             "oai-client-auth-session": snapshot}
                     if status != 200:
@@ -96,7 +107,7 @@ class CodexLoginTests(unittest.TestCase):
                     wanted = target or choices[0]["id"]
                     assert kwargs["json"] == {"workspace_id": wanted}
                     assert wanted != "stale-workspace"
-                    body = {"continue_url": callback, "page": {"type": "external_url", "payload": {"url": callback}},
+                    body = {"continue_url": self.callback, "page": {"type": "external_url", "payload": {"url": self.callback}},
                             "oai-client-auth-session": {"email": session_email, "workspaces": choices}}
                 else:
                     raise AssertionError("Unexpected offline request: " + method + " " + url)
@@ -132,8 +143,8 @@ class CodexLoginTests(unittest.TestCase):
         self.assertTrue(any(u.endswith("/workspace/select") for _, _, u, _ in calls))
 
     def test_team_reauth_selects_original_workspace_instead_of_first(self):
-        messages, calls = self.execute(mode="reauth", target="personal-workspace")
-        self.assertEqual(messages[-1]["event"], "complete")
+        messages, calls = self.execute(mode="reauth", target="personal-workspace", verify_original=True)
+        self.assertEqual(messages[-1]["event"], "original_workspace")
         selected = [kw["json"] for _, _, u, kw in calls if u.endswith("/workspace/select")]
         self.assertEqual(selected, [{"workspace_id": "personal-workspace"}])
 
@@ -153,11 +164,12 @@ class CodexLoginTests(unittest.TestCase):
                 self.assertEqual(messages[-1]["event"], "complete")
                 self.assertFalse(any(u.endswith("/workspace/select") for _, _, u, _ in calls))
 
-    def test_password_totp_direct_callback_reauth_verifies_original_without_replaying_credentials(self):
+    def test_password_totp_direct_callback_reauth_does_not_restart_authorization(self):
         for plan in ['plus', 'pro']:
             messages, calls = self.execute(plan=plan, mode='reauth', target='personal-workspace', workspaces=[], verify_original=True)
             self.assertEqual(messages[-1]['event'], 'original_workspace')
             self.assertEqual(messages[-1]['workspaceId'], 'personal-workspace')
+            self.assertEqual(sum(urlsplit(url).path == '/oauth/authorize' for _, _, url, _ in calls), 1)
             self.assertEqual(sum(u.endswith('/password/verify') for _, _, u, _ in calls), 1)
             self.assertEqual(sum(u.endswith('/mfa/verify') for _, _, u, _ in calls), 1)
             self.assertEqual(sum(u.endswith('/oauth/token') for _, _, u, _ in calls), 1)
@@ -167,6 +179,11 @@ class CodexLoginTests(unittest.TestCase):
         messages, calls = self.execute(plan='plus', mode='reauth', target='personal-workspace', workspaces=[], verify_original=True, token_workspace='other-workspace')
         self.assertEqual(messages[-1], {'event': 'error', 'code': 'fallback_identity'})
         self.assertEqual(sum(u.endswith('/oauth/token') for _, _, u, _ in calls), 1)
+
+    def test_password_totp_direct_callback_reauth_rejects_wrong_state_before_exchange(self):
+        messages, calls = self.execute(plan='plus', mode='reauth', target='personal-workspace', workspaces=[], verify_original=True, state='wrong')
+        self.assertEqual(messages[-1]['event'], 'error')
+        self.assertFalse(any(url.endswith('/oauth/token') for _, _, url, _ in calls))
 
     def test_personal_reauth_still_requires_original_workspace_proof(self):
         messages, _ = self.execute(plan="plus", mode="reauth", target="personal-workspace", workspaces=[{"id": "personal-workspace"}])

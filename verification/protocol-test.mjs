@@ -274,17 +274,26 @@ try {
   failComplete = true; await submit(['uncertain']); assert.equal((await finish('uncertain')).status, 'review'); const committed = completes.length; await tick(); await tick(); assert.equal(completes.length, committed); failComplete = false; check('Uncertain native commit is never automatically replayed')
   await submit(['slow', 'good']); await tick(); await stop(); await start(); await request('jobs'); assert.equal(job('slow').status, 'interrupted'); assert.equal(job('good').status, 'interrupted'); const prior = starts.length; await tick(); assert.equal(starts.length, prior); check('Restart interrupts all queued/running tasks without automatic credential submission')
   function fallbackAccount(id) { const a = make(id); a.userId = 'original-user'; accounts.push(a); revisions.set(id, 1); return a }
-  for (const id of ['same_good', 'same_wrong_user', 'same_wrong_workspace', 'same_wrong_subject', 'same_missing_subject']) {
+  for (const id of ['same_good', 'same_legacy', 'same_legacy_wrong_subject', 'same_wrong_user', 'same_wrong_workspace', 'same_wrong_subject', 'same_missing_subject']) {
     const a = fallbackAccount(id), original = structuredClone(a), beforeSave = saves.length, beforeDisable = disables.length, beforeComplete = completes.length
-    if (id === 'same_missing_subject') { const c = credential(a); delete c.facts.material.principal; credentials.set(id, c) }
+    const previous = credential(a)
+    if (id.startsWith('same_legacy') || id === 'same_missing_subject') {
+      delete previous.facts.material.principal
+      if (id.startsWith('same_legacy')) {
+        const subject = id === 'same_legacy' ? 'original-subject' : 'other-original-subject'
+        previous.facts.material.id_token = `fixture.${Buffer.from(JSON.stringify({ sub: subject, exp: 1 })).toString('base64url')}.signature`
+      }
+    } else previous.facts.material.principal.poid = 'original-poid'
+    credentials.set(id, previous)
     await submit([id]); await tick(); await finish(id)
     assert.equal(disables.length, beforeDisable); assert.equal(completes.length, beforeComplete)
-    if (id === 'same_good') {
+    if (id === 'same_good' || id === 'same_legacy') {
       assert.equal(job(id).status, 'success'); assert.equal(saves.length, beforeSave + 1); assert.equal(a.enabled, true); assert.equal(a.accountId, original.accountId)
+      assert.deepEqual(credentials.get(id).facts.material.principal, { oauth_subject: 'original-subject', poid: id === 'same_good' ? 'original-poid' : null })
       for (const key of ['id', 'email', 'userId', 'name', 'groups', 'notes', 'outboundProxyEndpoint', 'weight', 'concurrencyLimit', 'modelAccess']) assert.deepEqual(a[key], original[key])
     } else { assert.equal(job(id).status, 'review'); assert.equal(saves.length, beforeSave); assert.deepEqual(a, original) }
   }
-  check('Direct callbacks without workspace metadata write verified original-workspace tokens without disabling; wrong user/workspace/subject are rejected')
+  check('Verified original-workspace tokens write without disabling; subject must match the principal or previously saved ID token')
   for (const id of ['fb_good', 'fb_disabled', 'fb_already_free']) {
     const a = fallbackAccount(id)
     if (id === 'fb_disabled') a.enabled = false

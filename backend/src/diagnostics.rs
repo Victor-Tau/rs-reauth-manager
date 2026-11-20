@@ -28,7 +28,7 @@ pub fn trace(entry: &Value) -> Option<LogEntry> {
         "mfa_verified" => "2FA 验证已通过",
         "phone_required" => "上游要求添加手机号或手机验证",
         "authorization_resume" => "复用已验证会话继续原授权（仅一次）",
-        "original_verify" => "会话未提供工作区，使用独立 PKCE 核对原用户与原工作区授权",
+        "original_verify" => "使用本次授权回调换取令牌，核对原用户与原工作区",
         _ => return None,
     };
     let stage = message(

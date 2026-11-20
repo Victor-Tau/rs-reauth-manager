@@ -27,7 +27,7 @@ fn text<'a>(value: &'a Value, key: &str) -> Result<&'a str, PluginFault> {
         .ok_or_else(|| fault(IDENTITY_ERROR))
 }
 
-fn claims(token: &str) -> Result<Value, PluginFault> {
+fn token_claims(token: &str) -> Result<Value, PluginFault> {
     let parts: Vec<_> = token.split('.').collect();
     if parts.len() != 3 || parts.iter().any(|p| p.is_empty()) {
         return Err(fault(IDENTITY_ERROR));
@@ -35,7 +35,11 @@ fn claims(token: &str) -> Result<Value, PluginFault> {
     let bytes = URL_SAFE_NO_PAD
         .decode(parts[1])
         .map_err(|_| fault(IDENTITY_ERROR))?;
-    let claims: Value = serde_json::from_slice(&bytes).map_err(|_| fault(IDENTITY_ERROR))?;
+    serde_json::from_slice(&bytes).map_err(|_| fault(IDENTITY_ERROR))
+}
+
+fn claims(token: &str) -> Result<Value, PluginFault> {
+    let claims = token_claims(token)?;
     // 私有 TLS 交换结果的字段投影，不宣称为 JWT 签名校验
     let expires = claims["exp"]
         .as_u64()
@@ -139,11 +143,27 @@ pub async fn commit(
     )
     .await?;
     let mut facts = credential.facts;
-    let original_subject = facts
+    let same_workspace = output["event"] == "original_workspace";
+    let principal_subject = facts
         .material
         .get("principal")
         .and_then(|p| p["oauth_subject"].as_str());
-    if output["event"] == "original_workspace" && original_subject.is_none_or(str::is_empty) {
+    let previous_identity = if same_workspace && principal_subject.is_none() {
+        facts
+            .material
+            .get("id_token")
+            .and_then(Value::as_str)
+            .filter(|token| token.len() <= 32768)
+            .and_then(|token| token_claims(token).ok())
+    } else {
+        None
+    };
+    let original_subject = principal_subject.or_else(|| {
+        previous_identity
+            .as_ref()
+            .and_then(|claims| text(claims, "sub").ok())
+    });
+    if same_workspace && original_subject.is_none_or(str::is_empty) {
         return Err(fault(IDENTITY_ERROR));
     }
     if credential.account_id != id
@@ -161,23 +181,22 @@ pub async fn commit(
             .get("installation_id")
             .and_then(Value::as_str)
             .is_none()
-        || facts
-            .material
-            .get("principal")
-            .and_then(|p| p["oauth_subject"].as_str())
-            .is_some_and(|sub| identity["sub"] != sub)
+        || original_subject.is_some_and(|sub| identity["sub"] != sub)
     {
         return Err(fault(IDENTITY_ERROR));
     }
+    let update_principal = !same_workspace || principal_subject.is_none();
     for key in ["access_token", "refresh_token", "id_token"] {
         facts
             .material
             .insert(key.into(), output["tokens"][key].clone());
     }
-    facts.material.insert(
-        "principal".into(),
-        json!({"oauth_subject":identity["sub"],"poid":null}),
-    );
+    if update_principal {
+        facts.material.insert(
+            "principal".into(),
+            json!({"oauth_subject":identity["sub"],"poid":null}),
+        );
+    }
     facts.upstream_account_id = output["workspaceId"].as_str().map(str::to_owned);
     let plan = text(&identity[AUTH], "chatgpt_plan_type")?.to_ascii_lowercase();
     facts.plan_type = Some(plan.clone());
@@ -186,7 +205,6 @@ pub async fn commit(
     facts.next_refresh_at_ms = None;
     // 读取凭据后再次校验，先停止调度再变更工作区身份
     unchanged(&detail(host, id).await?, snapshot, original)?;
-    let same_workspace = output["event"] == "original_workspace";
     if !same_workspace && original["enabled"] != false {
         admin(
             host,

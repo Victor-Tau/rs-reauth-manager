@@ -1,4 +1,4 @@
-"""Isolated reauth-web login adapter. RS owns PKCE, token exchange and persistence."""
+"""Isolated reauth-web login adapter. RS owns credential persistence."""
 from __future__ import annotations
 
 import base64
@@ -95,7 +95,7 @@ def run(data):
     from vendor.lib.oauth_client import OAuthClient
     from totp import TotpMfaClient
     from login_flow import LoginFlowMixin
-    from fallback import WorkspaceUnavailable, personal_candidate, recover_free, recover_unbound_free, recover_original, workspace_choices
+    from fallback import WorkspaceUnavailable, personal_candidate, prepare_pkce, recover_free, recover_unbound_free, verify_free_tokens, workspace_choices
 
     target = str(data.get("accountId") or "")
     forced = data.get("forceWorkspaceId")
@@ -241,7 +241,8 @@ def run(data):
                 if not self.selected_workspace:
                     return not self.workspace_candidates
             session = self._decode_oauth_session_cookie() or {}
-            ids = [w.get("id") for w in session.get("workspaces", []) if isinstance(w, dict)]
+            workspaces = session.get("workspaces")
+            ids = [workspace.get("id") for workspace in workspaces if isinstance(workspace, dict)] if isinstance(workspaces, list) else []
             selected = self.selected_workspace
             return bool(selected) and (self.bound_workspace or session.get("workspace_id") == selected or ids == [selected])
 
@@ -276,7 +277,7 @@ def run(data):
             oauth.mfa_verified = False
             oauth.phone_required = False
             if resume:
-                # Same host-owned flow in the already verified session; never replays credentials
+                # Same OAuth flow in the already verified session; never replays credentials
                 oauth.session_continuation = True
                 try:
                     result = attempt(session_only=True)
@@ -285,7 +286,7 @@ def run(data):
             else:
                 result = attempt()
             if not resume and isinstance(result, dict) and result.get('ok') is not True and oauth.phone_required and oauth.mfa_verified:
-                # Continue only the same host-owned OAuth flow in the verified session
+                # Continue only the same OAuth flow in the verified session
                 # A second phone step or login challenge stops without replaying credentials
                 oauth.trace('authorization_resume', stage='authorize')
                 oauth.phone_required = False
@@ -318,8 +319,12 @@ def run(data):
                 tokens = recover_free(oauth, chat, authorize_url, data, forced, authorize, force=True)
                 emit("forced_workspace", workspaceId=forced, originalWorkspaceId=target, administratorConfirmed=True, tokens=tokens)
                 return
+            login_url, login_state, verifier = authorize_url, state, None
+            user = data.get("userId")
+            if not importing and target and isinstance(user, str) and user.strip():
+                login_url, login_state, verifier = prepare_pkce(oauth, authorize_url)
             try:
-                result = authorize(authorize_url, state)
+                result = authorize(login_url, login_state)
             except WorkspaceUnavailable as unavailable:
                 if importing:
                     raise ValueError("workspace") from None
@@ -328,7 +333,7 @@ def run(data):
             if not isinstance(result, dict) or not result.get("ok"):
                 emit('error', **oauth.failed_authorization)
                 return
-            if result.get("state") != state or not result.get("code"):
+            if result.get("state") != login_state or not isinstance(result.get("code"), str) or not result["code"]:
                 raise ValueError("state")
             if not importing and not forced:
                 snapshot = oauth._decode_oauth_session_cookie()
@@ -343,8 +348,8 @@ def run(data):
                     # Upstream issued a code for its default workspace; ask it again with the original one selected
                     oauth.trace('workspace_reselect', stage='workspace', listed=len(listed))
                     oauth.bound_workspace = False
-                    retry = authorize(authorize_url, state, resume=True)
-                    if isinstance(retry, dict) and retry.get("ok") is True and retry.get("state") == state and retry.get("code"):
+                    retry = authorize(login_url, login_state, resume=True)
+                    if isinstance(retry, dict) and retry.get("ok") is True and retry.get("state") == login_state and isinstance(retry.get("code"), str) and retry["code"]:
                         result = retry
                     else:
                         emit('error', **(oauth.failed_authorization or describe_failure(retry, attempt=oauth.last_attempt)))
@@ -353,12 +358,14 @@ def run(data):
                 if importing:
                     raise ValueError("workspace")
                 session = oauth._decode_oauth_session_cookie() or {}
-                if not forced and not session.get("workspaces") and not session.get("workspace_id") and not oauth.workspace_candidates and data.get("userId"):
-                    oauth.trace('original_verify', stage='identity')
-                    tokens = recover_original(oauth, chat, authorize_url, data, authorize)
-                    emit("original_workspace", workspaceId=target, originalWorkspaceId=target, tokens=tokens)
+                if verifier is None or session.get("workspaces") or session.get("workspace_id") or oauth.workspace_candidates:
+                    fallback(personal_candidate(session, target))
                     return
-                fallback(personal_candidate(oauth._decode_oauth_session_cookie(), target))
+            if verifier is not None:
+                oauth.trace('original_verify', stage='identity')
+                tokens = oauth._exchange_code_for_tokens(result["code"], verifier, chat.ua, chat.impersonate)
+                tokens = verify_free_tokens(tokens, email, user, target, force=True)
+                emit("original_workspace", workspaceId=target, originalWorkspaceId=target, tokens=tokens)
                 return
             callback = urlunsplit((redirect.scheme, redirect.netloc, redirect.path, urlencode({"state": state, "code": result["code"]}), ""))
             emit("complete", callbackUrl=callback)
