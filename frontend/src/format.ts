@@ -24,7 +24,7 @@ export function displayTime(value?: number | string | null) {
 export function statusText(a: Account) { return !a.enabled ? '已停用' : ({ normal: '正常', error: '异常', quota_paused: '额度暂停', quota_exhausted: '额度耗尽', rate_limited: '限流' } as Record<string, string>)[a.status] || a.status }
 export function progress(job?: Job) {
   if (job?.kind === 'logout') return ({ queued: '等待退出', preparing: '核对账号', logout: '退出中', logged_out: '已退出', success: '已退出', failed: '退出失败', review: '需要核对', interrupted: '已中断', cancelled: '已取消' } as Record<string, string>)[job.step] || '退出中'
-  return !job ? '未执行' : ({ queued: '等待处理', preparing: '核对资料', session: '建立会话', login: '协议登录', mfa: '验证 2FA', saving: '写回授权', success: '已写回', free: '登录成功', failed: '登录失败', workspace: '工作区不匹配', review: '需要核对', interrupted: '已中断', cancelled: '已取消' } as Record<string, string>)[job.step] || '登录中'
+  return !job ? '未执行' : ({ queued: '等待处理', preparing: '核对资料', session: '建立会话', login: '协议登录', mfa: '验证 2FA', reauth_email_code: '等待邮箱验证码', reauth_email_verifying: '验证邮箱验证码', saving: '写回授权', success: '已写回', free: '登录成功', failed: '登录失败', workspace: '工作区不匹配', review: '需要核对', interrupted: '已中断', cancelled: '已取消' } as Record<string, string>)[job.step] || '登录中'
 }
 
 export type Tone = 'default' | 'primary' | 'success' | 'info' | 'warning' | 'danger'

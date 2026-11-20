@@ -20,7 +20,7 @@ class LoginFlowMixin:
     def _infer_external_page_type(self, url, text):
         page = super()._infer_external_page_type(url, text)
         # The email-first landing page still offers the supplied password method
-        return "log-in" if page == "email-verification" else page
+        return "log-in" if page == "email-verification" and not self.password_submitted else page
 
     def _oauth_drive_external_login_for_continue(self, **kwargs):
         if getattr(self, "session_continuation", False) or self.password_submitted:

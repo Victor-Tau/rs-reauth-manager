@@ -1,6 +1,7 @@
 """Sanitized fixtures for the current Team and Plus/Pro Codex login captures."""
 import base64
 import hashlib
+from io import StringIO
 import json
 from pathlib import Path
 import socket
@@ -22,7 +23,8 @@ from vendor.lib import chatgpt_client, oauth_client
 class CodexLoginTests(unittest.TestCase):
     def execute(self, *, plan="team", mode="import", target="", state="fixture",
                 mfa_status=200, password_status=200, session_email=EMAIL,
-                workspaces=None, landing="/log-in-or-create-account", cookie=True, bounce=False, verify_original=False, token_workspace=None):
+                workspaces=None, landing="/log-in-or-create-account", cookie=True, bounce=False, verify_original=False, token_workspace=None,
+                email_status=None, repeat_email=False):
         calls, messages, sessions = [], [], []
         choices = workspaces if workspaces is not None else [
             {"id": "team-workspace", "name": "Example Team", "kind": "organization"},
@@ -70,6 +72,10 @@ class CodexLoginTests(unittest.TestCase):
                     status, headers = (307, {"Location": desktop_url()}) if bounce and self.authorizations == 1 else (302, {"Location": "https://auth.openai.com" + landing})
                 elif method == "GET" and url == desktop_url():
                     status, headers = 302, {"Location": URL}
+                elif method == "GET" and url.endswith("/api/accounts/email-otp/send") and email_status is not None:
+                    status, headers = 302, {"Location": "/email-verification"}
+                elif method == "GET" and url.endswith("/email-verification") and email_status is not None:
+                    headers = {"Content-Type": "text/html"}
                 elif method == "GET" and url.endswith(("/log-in-or-create-account", "/log-in/password", "/email-verification", "/mfa-challenge")):
                     pass
                 elif method == "POST" and url.endswith("/authorize/continue"):
@@ -100,6 +106,15 @@ class CodexLoginTests(unittest.TestCase):
                             "oai-client-auth-session": snapshot}
                     if status != 200:
                         body = {"error": {"code": "rate_limit_exceeded"}}
+                    elif email_status is not None:
+                        body["continue_url"] = "/api/accounts/email-otp/send"
+                        body["page"] = {"type": "external_url"}
+                elif method == "POST" and url.endswith("/email-otp/validate") and email_status is not None:
+                    testcase.assertEqual(kwargs["json"], {"code": "654321"})
+                    testcase.assertTrue(kwargs["headers"]["Referer"].endswith("/email-verification"))
+                    status = email_status
+                    body = {"continue_url": "/email-verification" if repeat_email else self.callback,
+                            "oai-client-auth-session": {"email": session_email, "email_verified": True}}
                 elif method == "GET" and url == consent:
                     headers = {"Content-Type": "text/html"}
                     body = {"page": "sign_in_with_chatgpt_codex_consent"}
@@ -120,6 +135,7 @@ class CodexLoginTests(unittest.TestCase):
              patch.object(oauth_client, "create_http_session", side_effect=lambda **kw: Session()), \
              patch.object(oauth_client, "build_sentinel_token", side_effect=lambda *a, **kw: "private-" + kw["flow"]), \
              patch.object(runner, "emit", side_effect=lambda event, **kw: messages.append({"event": event, **kw})), \
+             patch("sys.stdin", StringIO('{"code":"654321"}\n')), \
              patch("totp.TotpMfaClient.get_mfa_code", return_value="123456"), \
              patch.object(socket, "create_connection", side_effect=AssertionError("Network forbidden")):
             try:
@@ -130,10 +146,11 @@ class CodexLoginTests(unittest.TestCase):
                 messages.append({"event": "error", "code": "fallback_identity"})
         self.assertTrue(all(s is sessions[0] for s, _, _, _ in calls))
         self.assertTrue(all(s.closed for s in sessions))
-        self.assertFalse(any("passwordless/" in u or "email-otp/" in u for _, _, u, _ in calls))
+        if email_status is None:
+            self.assertFalse(any("passwordless/" in u or "email-otp/" in u for _, _, u, _ in calls))
         self.assertLessEqual(sum(u.endswith("/password/verify") for _, _, u, _ in calls), 1)
         self.assertLessEqual(sum(u.endswith("/mfa/verify") for _, _, u, _ in calls), 1)
-        for secret in ["fixture-password", "private-session", "private-factor", "private-verify_mfa", "123456"]:
+        for secret in ["fixture-password", "private-session", "private-factor", "private-verify_mfa", "123456", "654321"]:
             self.assertNotIn(secret, json.dumps(messages))
         return messages, calls
 
@@ -174,6 +191,35 @@ class CodexLoginTests(unittest.TestCase):
             self.assertEqual(sum(u.endswith('/mfa/verify') for _, _, u, _ in calls), 1)
             self.assertEqual(sum(u.endswith('/oauth/token') for _, _, u, _ in calls), 1)
             self.assertNotIn('private-fresh-refresh', json.dumps(messages[:-1]))
+
+    def test_mfa_email_challenge_continues_same_authorization_after_manual_code(self):
+        messages, calls = self.execute(plan='plus', mode='reauth', target='personal-workspace', verify_original=True, email_status=200)
+        self.assertIn({'event': 'step', 'step': 'reauth_email_code'}, messages)
+        self.assertEqual(messages[-1]['event'], 'original_workspace')
+        self.assertEqual(messages[-1]['workspaceId'], 'personal-workspace')
+        self.assertEqual([(method, urlsplit(url).path) for _, method, url, _ in calls if 'email-otp' in url], [
+            ('GET', '/api/accounts/email-otp/send'), ('POST', '/api/accounts/email-otp/validate'),
+        ])
+        self.assertEqual(sum(urlsplit(url).path == '/oauth/authorize' for _, _, url, _ in calls), 1)
+
+    def test_mfa_email_challenge_stops_if_rejected_repeated_or_state_is_wrong(self):
+        for args, expected in [({'email_status': 401}, 'email_code_rejected'),
+                               ({'email_status': 429}, 'rate_limited'),
+                               ({'email_status': 500}, 'email_verification_failed'),
+                               ({'email_status': 200, 'repeat_email': True}, 'email_verification_failed')]:
+            with self.subTest(args=args):
+                messages, calls = self.execute(mode='reauth', target='personal-workspace', **args)
+                self.assertEqual(messages[-1]['diagnostic']['reason'], expected)
+                self.assertEqual(sum(url.endswith('/email-otp/validate') for _, _, url, _ in calls), 1)
+                self.assertFalse(any(url.endswith('/oauth/token') for _, _, url, _ in calls))
+        messages, calls = self.execute(plan='plus', mode='reauth', target='personal-workspace', verify_original=True, email_status=200, state='wrong')
+        self.assertEqual(messages[-1]['event'], 'error')
+        self.assertFalse(any(url.endswith('/oauth/token') for _, _, url, _ in calls))
+
+    def test_mfa_email_challenge_import_reports_human_step(self):
+        messages, calls = self.execute(email_status=200)
+        self.assertEqual(messages[-1]['diagnostic']['reason'], 'email_code_required')
+        self.assertFalse(any(url.endswith('/email-otp/validate') for _, _, url, _ in calls))
 
     def test_password_totp_direct_callback_rejects_token_for_other_workspace(self):
         messages, calls = self.execute(plan='plus', mode='reauth', target='personal-workspace', workspaces=[], verify_original=True, token_workspace='other-workspace')

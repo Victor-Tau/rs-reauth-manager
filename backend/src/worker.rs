@@ -30,6 +30,29 @@ pub struct Worker {
     pub snapshot: Value,
     pub request_id: String,
 }
+impl Worker {
+    pub async fn submit_reauth_email_code(&mut self, code: &str) -> Result<(), PluginFault> {
+        let mut command = serde_json::to_vec(&serde_json::json!({"code": code}))
+            .map_err(|_| fault("验证码编码失败"))?;
+        command.push(b'\n');
+        let mut input = {
+            let mut output = self.output.lock().map_err(|_| fault("协议进度读取失败"))?;
+            if output.closed || output.result.is_some() || output.step != "reauth_email_code" {
+                return Err(fault("当前任务未等待邮箱验证码"));
+            }
+            let input = self.input.take().ok_or_else(|| fault("授权会话不可用"))?;
+            output.step = "reauth_email_verifying".into();
+            output.logs.push(crate::diagnostics::lifecycle(
+                "已提交邮箱验证码，继续本次授权",
+            ));
+            input
+        };
+        input
+            .write_all(&command)
+            .await
+            .map_err(|_| fault("验证码未能送达授权进程，请查看任务结果"))
+    }
+}
 impl Drop for Worker {
     fn drop(&mut self) {
         let _ = self.child.start_kill();
@@ -216,7 +239,7 @@ impl Runtime {
             .write_all(b"\n")
             .await
             .map_err(|_| fault("协议进程不可用"))?;
-        let interactive = input["mode"] == "change_email";
+        let interactive = matches!(input["mode"].as_str(), Some("change_email" | "reauth"));
         let input = if interactive {
             Some(stdin)
         } else {
@@ -255,6 +278,7 @@ impl Runtime {
                             Some("session") => "session",
                             Some("login") => "login",
                             Some("mfa") => "mfa",
+                            Some("reauth_email_code") => "reauth_email_code",
                             Some("logout") => "logout",
                             Some("email_code") => "email_code",
                             Some("email_begin") => "email_begin",
@@ -267,6 +291,7 @@ impl Runtime {
                                 "session" => "建立登录会话",
                                 "login" => "进入协议登录流程",
                                 "mfa" => "生成并提交 2FA 动态码",
+                                "reauth_email_code" => "等待手动输入账号邮箱收到的验证码",
                                 "logout" => "使用现有授权发送退出请求",
                                 "email_begin" => "开始发送新邮箱换绑验证码",
                                 "email_code" => "等待手动输入新邮箱换绑验证码",

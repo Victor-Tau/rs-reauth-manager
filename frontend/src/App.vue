@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import Notice from './components/Notice.vue'
 import StatTile from './components/StatTile.vue'
 import AutomationPage from './components/AutomationPage.vue'
@@ -23,6 +23,7 @@ import { ZTable, type TableColumn } from '@codex-proxy/ui/table'
 import { ZTag } from '@codex-proxy/ui/tag'
 import { displayTime, expiryInfo, isActive, jobTone, planLabel, planType, progress, resultMessage, statusText, statusTone } from './format'
 import { useReauthManager } from './useReauthManager'
+import { api } from './api'
 import type { Account } from './types'
 
 const section = ref<'accounts' | 'config' | 'import' | 'email'>('accounts')
@@ -30,6 +31,27 @@ const { accounts, jobs, selected, loading, busy, enabled, error, search, plan, g
 const logRequestId = ref('')
 const logJob = computed(() => jobs.value.find(job => job.requestId === logRequestId.value))
 const showLogs = computed({ get: () => !!logRequestId.value, set: value => { if (!value) logRequestId.value = '' } })
+const emailCodeJob = computed(() => jobs.value.find(job => job.status === 'running' && job.step === 'reauth_email_code'))
+const emailCodeAccount = computed(() => accounts.value.find(account => account.id === emailCodeJob.value?.accountId))
+const emailCode = ref('')
+const emailCodeSending = ref(false)
+const emailCodeSentFor = ref('')
+watch(() => emailCodeJob.value?.requestId, () => { emailCode.value = '' })
+async function submitReauthEmailCode() {
+  const job = emailCodeJob.value
+  if (!job || emailCodeSending.value || emailCodeSentFor.value === job.requestId || !/^[0-9]{6}$/.test(emailCode.value)) return
+  emailCodeSending.value = true
+  error.value = ''
+  try {
+    await api.reauthEmailCode(job.requestId, emailCode.value)
+    emailCodeSentFor.value = job.requestId
+    emailCode.value = ''
+  } catch (e) {
+    error.value = (e as Error).message
+  } finally {
+    emailCodeSending.value = false
+  }
+}
 const statusOptions = [{ value: 'all', label: '全部状态' }, { value: 'error', label: '账号异常' }, { value: 'ready', label: '可重新授权' }, { value: 'active', label: '处理中' }, { value: 'failed', label: '本次未完成' }, { value: 'success', label: '本次成功' }, { value: 'invalid', label: '备注待检查' }, { value: 'disabled', label: '已停用' }]
 const baseColumns: TableColumn<Account>[] = [{ key: 'select', label: '', width: 48 }, { key: 'identity', label: '账号', kind: 'identity', minWidth: 300 }, { key: 'status', label: '账号状态', width: 120 }, { key: 'credentials', label: '授权条件', minWidth: 210 }, { key: 'result', label: '最近操作', minWidth: 230 }, { key: 'actions', label: '操作', kind: 'actions', width: 250 }]
 const compactColumns = baseColumns.filter(column => ['select', 'identity', 'actions'].includes(column.key))
@@ -63,6 +85,17 @@ const resultTone = (a: Account) => jobTone(resultOf(a))
       <ZSwitch class="master-switch" :model-value="enabled" :disabled="busy" :label="enabled ? '插件已开启' : '插件已关闭'" title="关闭后停止当前队列，并阻止新的重新授权任务" aria-label="插件总开关" @update:model-value="setEnabled" />
     </header>
     <Notice v-if="loaded && !enabled" tone="warning">插件已关闭，当前队列已停止，开启后才能提交重新授权、退出登录及导入任务</Notice>
+    <ZCard v-if="enabled && emailCodeJob" as="section" padding="compact" class="panel" aria-label="重新授权邮箱验证">
+      <form class="toolbar" @submit.prevent="submitReauthEmailCode">
+        <template v-if="emailCodeSentFor !== emailCodeJob.requestId">
+          <label for="reauth-email-code">{{ emailCodeAccount?.email || emailCodeAccount?.name || emailCodeJob.accountId }} 需要邮箱验证码</label>
+          <ZInput id="reauth-email-code" v-model="emailCode" class="search" inputmode="numeric" autocomplete="one-time-code" :maxlength="6" aria-label="六位邮箱验证码" />
+          <ZButton type="primary" native-type="submit" :loading="emailCodeSending" :disabled="emailCodeSending || !/^[0-9]{6}$/.test(emailCode)">提交验证码</ZButton>
+        </template>
+        <span v-else role="status">验证码已提交，正在继续授权</span>
+        <ZButton :disabled="busy || emailCodeSending" @click="cancel(emailCodeJob)">取消该任务</ZButton>
+      </form>
+    </ZCard>
     <Notice v-if="section !== 'accounts' && error" tone="danger" role="alert">{{ error }}</Notice>
     <AutomationPage v-if="section === 'config'" :enabled="enabled" :accounts="accounts" @saved="load" />
     <ImportPage v-if="section === 'import'" :enabled="enabled" :jobs="jobs" @submitted="load" />

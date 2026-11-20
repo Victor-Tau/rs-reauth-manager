@@ -24,6 +24,8 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+const JOB_TIMEOUT_MS: u64 = 420000;
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Job {
@@ -181,6 +183,12 @@ struct Cancel {
     request_id: Option<String>,
 }
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ReauthEmailCode {
+    request_id: String,
+    code: String,
+}
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Config {
     enabled: bool,
@@ -254,6 +262,7 @@ fn registration() -> ManagementRegistration {
             ("POST", "api/email-delete"),
             ("POST", "api/config"),
             ("POST", "api/submit"),
+            ("POST", "api/reauth-email-code"),
             ("POST", "api/logout"),
             ("POST", "api/cancel"),
             ("POST", "api/tick"),
@@ -587,7 +596,7 @@ impl Manager {
                         job.workspace_choices = workspace_choices(&output);
                     }
                 }
-            } else if now().saturating_sub(current.started) > 420000 {
+            } else if now().saturating_sub(current.started) > JOB_TIMEOUT_MS {
                 if job.kind == "logout" {
                     job.finish(
                         "review",
@@ -693,7 +702,7 @@ impl Manager {
                 let proxy=proxy(host,&a).await?;
                 let start=admin(host,"POST","/api/admin/accounts/oauth/start",Some(json!({"provider":"openai","name":a["name"],"accountId":a["id"]}))).await?;
                 let flow=start["flowId"].as_str().ok_or_else(||fault("RS 授权流程无效"))?.to_owned();
-                let input=json!({"notes":a["notes"],"email":a["email"],"proxy":proxy,"authorizationUrl":start["authorizationUrl"],"accountId":a["accountId"],"userId":a["userId"],"forceWorkspaceId":job.force_workspace_id,"forceFree":job.free_fallback});
+                let input=json!({"mode":"reauth","notes":a["notes"],"email":a["email"],"proxy":proxy,"authorizationUrl":start["authorizationUrl"],"accountId":a["accountId"],"userId":a["userId"],"forceWorkspaceId":job.force_workspace_id,"forceFree":job.free_fallback});
                 self.runtime.start(input,flow,json!({"settings":settings(&a),"credentialRevision":a["_credentialRevision"]}),job.request_id.clone()).await
             }.await;
             match result {
@@ -825,6 +834,32 @@ async fn handle(
     }
     let (mut queue, version) = host::load(&call.host).await?;
     match call.request.path.as_str() {
+        "api/reauth-email-code" => {
+            let request: ReauthEmailCode =
+                serde_json::from_slice(&call.payload).map_err(|_| fault("验证码请求格式无效"))?;
+            if request.code.len() != 6 || !request.code.bytes().all(|c| c.is_ascii_digit()) {
+                return Err(fault("请输入六位邮箱验证码"));
+            }
+            if !queue.enabled
+                || !queue.jobs.iter().any(|job| {
+                    job.request_id == request.request_id
+                        && job.kind == "reauth"
+                        && job.status == "running"
+                })
+            {
+                return Err(fault("授权会话已结束"));
+            }
+            let worker = manager
+                .worker
+                .as_mut()
+                .filter(|worker| {
+                    worker.request_id == request.request_id
+                        && now().saturating_sub(worker.started) <= JOB_TIMEOUT_MS
+                })
+                .ok_or_else(|| fault("授权会话已结束"))?;
+            worker.submit_reauth_email_code(&request.code).await?;
+            return Ok(json!({"ok":true}));
+        }
         "api/import" => {
             return importing::submit(manager, &call.host, &call.payload, queue, version).await;
         }

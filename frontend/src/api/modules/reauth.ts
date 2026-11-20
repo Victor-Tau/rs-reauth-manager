@@ -18,6 +18,7 @@ export const api = {
   accounts: () => request('GET', 'api/accounts').then(parseAccounts),
   jobs: () => request('GET', 'api/jobs').then(parseJobs),
   submit: (accountIds: string[], requestId: string) => request('POST', 'api/submit', { accountIds, requestId }).then(parseJobs),
+  reauthEmailCode: (requestId: string, code: string) => request('POST', 'api/reauth-email-code', { requestId, code }).then(parseTick),
   logout: (accountIds: string[], requestId: string) => request('POST', 'api/logout', { accountIds, requestId, confirmation: 'logout_all_and_disable' }).then(parseJobs),
   cancel: (requestId: string | null = null) => request('POST', 'api/cancel', { requestId }).then(parseJobs),
   tick: () => request('POST', 'api/tick', {}).then(parseTick),

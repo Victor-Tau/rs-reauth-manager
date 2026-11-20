@@ -214,7 +214,7 @@ const check = name => { passed++; console.log(`PASS ${name}`) }
 try {
   await start()
   check('RPC v7 handshake uses SDK default stage budgets')
-  const reg = JSON.parse((await call('management.register', {}, Buffer.alloc(0), 'registration')).payload.toString()); assert.equal(reg.resources.length, 3); assert.equal(reg.routes.length, 21); assert.ok(reg.routes.some(r => r.method === 'POST' && r.path === 'api/logout')); assert.ok(reg.routes.some(r => r.method === 'POST' && r.path === 'api/import-batch')); assert.ok(reg.routes.some(r => r.path === 'api/email-begin')); assert.ok(!reg.resources.some(r => r.path.includes('runtime'))); check('Only UI resources are exposed, protocol runtime stays private')
+  const reg = JSON.parse((await call('management.register', {}, Buffer.alloc(0), 'registration')).payload.toString()); assert.equal(reg.resources.length, 3); assert.equal(reg.routes.length, 22); assert.ok(reg.routes.some(r => r.method === 'POST' && r.path === 'api/logout')); assert.ok(reg.routes.some(r => r.method === 'POST' && r.path === 'api/import-batch')); assert.ok(reg.routes.some(r => r.path === 'api/email-begin')); assert.ok(reg.routes.some(r => r.method === 'POST' && r.path === 'api/reauth-email-code')); assert.ok(!reg.resources.some(r => r.path.includes('runtime'))); check('Only UI resources are exposed, protocol runtime stays private')
   const largeContext = { method: 'GET', uri: '/plugin/api/jobs', http_version: 'HTTP/1.1', headers: [{ name: 'x-fixture', value: Buffer.alloc(70000, 'x').toString('base64') }], peer_addr: null, client_ip: null }
   const contextual = await call('management.handle', { method: 'GET', path: 'api/jobs', query: '', content_type: null, headers: [] }, Buffer.alloc(0), 'management', largeContext)
   assert.equal(contextual.result.status, 200); assert.ok(!contextual.payload.includes('fixture-private-context')); check('RPC v7 carries large request context separately from metadata and business JSON')
@@ -397,6 +397,35 @@ try {
   await tick(); assert.equal(starts.length, startedBeforeClose)
   await submit(['good']); assert.equal((await finish('good')).status, 'success')
   check('Switch survives plugin restart and reopening only allows explicitly submitted new jobs')
+
+  const reauthEmail = make('reauth_email')
+  accounts.push(reauthEmail); revisions.set(reauthEmail.id, 1)
+  async function waitForReauthEmail() {
+    await submit([reauthEmail.id]); await tick()
+    for (let i = 0; i < 60; i++) {
+      await tick()
+      if (job(reauthEmail.id).step === 'reauth_email_code') return job(reauthEmail.id).requestId
+      await sleep(25)
+    }
+    throw new Error('Reauthorization did not wait for an email code')
+  }
+  const beforeEmailComplete = completes.length, beforeEmailStart = starts.length
+  let emailRequestId = await waitForReauthEmail()
+  assert.equal(completes.length, beforeEmailComplete)
+  assert.equal((await request('reauth-email-code', { requestId: emailRequestId, code: 'no' })).status, 400)
+  assert.equal((await request('reauth-email-code', { requestId: 'stale', code: '654321' })).status, 400)
+  assert.deepEqual((await request('reauth-email-code', { requestId: emailRequestId, code: '654321' })).value, { ok: true })
+  assert.equal((await request('reauth-email-code', { requestId: emailRequestId, code: '654321' })).status, 400)
+  const emailResult = await finish(reauthEmail.id)
+  assert.equal(emailResult.status, 'success')
+  assert.equal(completes.length, beforeEmailComplete + 1); assert.equal(starts.length, beforeEmailStart + 1)
+  assert.ok(!JSON.stringify(emailResult).includes('654321'))
+  emailRequestId = await waitForReauthEmail()
+  assert.equal((await request('cancel', { requestId: emailRequestId })).status, 200)
+  assert.equal((await request('reauth-email-code', { requestId: emailRequestId, code: '654321' })).status, 400)
+  assert.equal(job(reauthEmail.id).status, 'cancelled'); assert.equal(completes.length, beforeEmailComplete + 1)
+  accounts.splice(accounts.indexOf(reauthEmail), 1); revisions.delete(reauthEmail.id)
+  check('Reauthorization waits for its own email code, submits it once, and rejects codes after cancellation')
 
   const importPayload = (label, overrides = {}) => ({ requestId: randomUUID(), email: `${label}@example.com`, name: `${label}@example.com`, password: 'fixture-password', totpSecret: 'GEZDGNBVGY3TQOJQ', workspaceId: '', transport: 'prefer_websocket', outboundProxyId: 'proxy_default', loginProxyUrl: '', saveLoginNotes: false, settings: { notes: 'Imported account', enabled: true, concurrencyLimit: 12, weight: 42, modelAccess: { mode: 'allowlist', models: ['gpt-5', 'gpt-5-mini'] }, groupIds: ['g1', 'g2'] }, ...overrides })
   async function finishImport(requestId, suffix = ':import') {

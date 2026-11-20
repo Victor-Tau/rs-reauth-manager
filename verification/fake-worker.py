@@ -46,6 +46,10 @@ assert authorization(data["authorizationUrl"])[1] == "fixture"
 print(json.dumps({"event": "step", "step": "login"}), flush=True)
 for _ in range(160 if data['email'].startswith('diagnostic_unsafe') else 1):
     print(json.dumps({'event':'diagnostic', 'entry':{'action':'response','stage':'consent','method':'GET','httpStatus':200,'elapsedMs':123,'pageType':'consent','rawResponse':'fixture-password fallback-private-rt','url':'private-host'}}), flush=True)
+if data['email'].startswith('reauth_email'):
+    assert data['mode'] == 'reauth'
+    print(json.dumps({'event': 'step', 'step': 'reauth_email_code'}), flush=True)
+    assert json.loads(sys.stdin.readline()) == {'code': '654321'}
 if data["email"].startswith("slow"):
     time.sleep(60)
 elif data["email"].startswith("failed"):

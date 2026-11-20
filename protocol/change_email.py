@@ -1,10 +1,9 @@
 """Interactive web-session email change, following the supplied HAR contract."""
-import json
 import re
 import sys
 from urllib.parse import urljoin, urlsplit
 
-from runner import parse_notes
+from runner import parse_notes, read_code
 from totp import TotpMfaClient
 from vendor.lib.chatgpt_client import ChatGPTClient
 from vendor.lib.oauth_client import OAuthClient
@@ -14,15 +13,6 @@ from email_trace import EmailTrace
 
 BASE = "https://chatgpt.com"
 CLIENT_ID = "TdJIcbe16WoTHtN95nyywh5E4yOo6ItG"
-
-
-def read_code(emit, step):
-    emit("step", step=step)
-    command = json.loads(sys.stdin.readline(1024))
-    code = command.get("code", "")
-    if not isinstance(code, str) or not re.fullmatch(r"[0-9]{6}", code):
-        raise ValueError("credentials")
-    return code
 
 
 class WebOAuth(LoginFlowMixin, OAuthClient):

@@ -20,6 +20,15 @@ def emit(event, **fields):
     sys.__stdout__.flush()
 
 
+def read_code(emit, step):
+    emit("step", step=step)
+    command = json.loads(sys.stdin.readline(1024))
+    code = command.get("code", "") if isinstance(command, dict) else ""
+    if not isinstance(code, str) or not re.fullmatch(r"[0-9]{6}", code):
+        raise ValueError("credentials")
+    return code
+
+
 def parse_notes(notes, email):
     if not isinstance(notes, str) or len(notes) > 2000 or any(c in notes for c in "\r\n\0"):
         raise ValueError("credentials")
@@ -114,6 +123,7 @@ def run(data):
         last_attempt = None
         failed_authorization = None
         mfa_verified = False
+        email_code_submitted = False
         phone_required = False
         session_continuation = False
 
@@ -135,6 +145,35 @@ def run(data):
                 self.last_oauth_error = 'session_login_required'
                 return ''
             return super()._oauth_drive_external_login_for_continue(**kwargs)
+
+        def _oauth_complete_email_otp_for_continue(self, *, continue_url, mail_client, **kwargs):
+            if self.email_code_submitted:
+                self.last_oauth_error = 'email_otp_verification_failed'
+                return ''
+            page = urlsplit(continue_url)
+            if (not self.mfa_verified or not mail_client or page.scheme != 'https'
+                    or page.netloc != 'auth.openai.com' or page.path.rstrip('/') != '/email-verification'):
+                self.last_oauth_error = 'email_otp_provider_required'
+                return ''
+            code = mail_client(emit, 'reauth_email_code')
+            self.email_code_submitted = True
+            response = self._oauth_request(
+                'POST', self.oauth_issuer + '/api/accounts/email-otp/validate',
+                json={'code': code}, allow_redirects=False, timeout=30,
+                impersonate=self.login_impersonate,
+                headers={'Accept': 'application/json', 'Content-Type': 'application/json',
+                         'Origin': self.oauth_issuer, 'Referer': continue_url,
+                         'User-Agent': self.login_user_agent, 'oai-device-id': self.login_device_id},
+            )
+            if response.status_code != 200:
+                self.last_oauth_error = ('email_otp_rejected_' + str(response.status_code)
+                                         if response.status_code in {400, 401, 403, 409, 422}
+                                         else 'email_otp_verification_failed')
+                return ''
+            next_url = self._response_next_url(response, continue_url)
+            if not next_url:
+                self.last_oauth_error = 'email_otp_verification_failed'
+            return next_url
 
         def _oauth_complete_add_phone_for_continue(self, *args, **kwargs):
             # The plugin has no SMS provider; preserve the actual stopped step
@@ -268,7 +307,7 @@ def run(data):
         def authorize(url, expected, resume=False):
             def attempt(*, session_only=False):
                 try:
-                    return oauth.authorize_external_oauth_url(url, chat, expected_state=expected, user_agent=chat.ua, impersonate=chat.impersonate, email=email, password='' if session_only else password, mfa_client=None if session_only else ProgressMfa(secret, max_attempts=1), max_hops=20)
+                    return oauth.authorize_external_oauth_url(url, chat, expected_state=expected, user_agent=chat.ua, impersonate=chat.impersonate, email=email, password='' if session_only else password, mfa_client=None if session_only else ProgressMfa(secret, max_attempts=1), mail_client=read_code if data.get('mode') == 'reauth' else None, max_hops=20)
                 except PhoneVerificationRequired:
                     return {'ok': False, 'error': 'phone_required'}
 
