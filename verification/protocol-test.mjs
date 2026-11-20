@@ -70,10 +70,10 @@ async function callback(meta, payload) {
   if (meta.method === 'host.auth.save') {
     assert.ok(payload.length); assert.deepEqual(meta.params, {}); assert.equal(data.action, 'replace')
     const a = accounts.find(a => a.id === data.account_id), old = credentials.get(a.id)
-    assert.equal(a.enabled, false); assert.equal(a.capacity.usedSlots, 0); assert.equal(data.credential_revision, revisions.get(a.id))
+    assert.equal(a.enabled, a.id.startsWith('same_') ? true : false); assert.equal(a.capacity.usedSlots, 0); assert.equal(data.credential_revision, revisions.get(a.id))
     for (const key of ['installation_id', 'transport', 'cookies', 'oauth_client_id', 'oauth_scope']) assert.deepEqual(data.facts.material[key], old.facts.material[key])
     assert.equal(data.facts.email, old.facts.email); assert.equal(data.facts.upstream_user_id, old.facts.upstream_user_id); assert.equal(data.facts.name, old.facts.name)
-    assert.equal(data.facts.plan_type, a.id.startsWith('force_') ? 'plus' : 'free'); assert.equal(data.facts.upstream_account_id, a.id.startsWith('force_') ? 'alternate-workspace' : 'personal-workspace'); assert.equal(data.facts.material.refresh_token, 'fallback-private-rt')
+    assert.equal(data.facts.plan_type, a.id.startsWith('force_') || a.id.startsWith('same_') ? 'plus' : 'free'); assert.equal(data.facts.upstream_account_id, a.id.startsWith('same_') ? 'original-workspace' : a.id.startsWith('force_') ? 'alternate-workspace' : 'personal-workspace'); assert.equal(data.facts.material.refresh_token, 'fallback-private-rt')
     saves.push(a.id)
     if (a.id === 'fb_save_failure') return result(meta.id, {}, {})
     a.accountId = data.facts.upstream_account_id; a.planType = data.facts.plan_type; a.status = 'normal'
@@ -274,6 +274,17 @@ try {
   failComplete = true; await submit(['uncertain']); assert.equal((await finish('uncertain')).status, 'review'); const committed = completes.length; await tick(); await tick(); assert.equal(completes.length, committed); failComplete = false; check('Uncertain native commit is never automatically replayed')
   await submit(['slow', 'good']); await tick(); await stop(); await start(); await request('jobs'); assert.equal(job('slow').status, 'interrupted'); assert.equal(job('good').status, 'interrupted'); const prior = starts.length; await tick(); assert.equal(starts.length, prior); check('Restart interrupts all queued/running tasks without automatic credential submission')
   function fallbackAccount(id) { const a = make(id); a.userId = 'original-user'; accounts.push(a); revisions.set(id, 1); return a }
+  for (const id of ['same_good', 'same_wrong_user', 'same_wrong_workspace', 'same_wrong_subject', 'same_missing_subject']) {
+    const a = fallbackAccount(id), original = structuredClone(a), beforeSave = saves.length, beforeDisable = disables.length, beforeComplete = completes.length
+    if (id === 'same_missing_subject') { const c = credential(a); delete c.facts.material.principal; credentials.set(id, c) }
+    await submit([id]); await tick(); await finish(id)
+    assert.equal(disables.length, beforeDisable); assert.equal(completes.length, beforeComplete)
+    if (id === 'same_good') {
+      assert.equal(job(id).status, 'success'); assert.equal(saves.length, beforeSave + 1); assert.equal(a.enabled, true); assert.equal(a.accountId, original.accountId)
+      for (const key of ['id', 'email', 'userId', 'name', 'groups', 'notes', 'outboundProxyEndpoint', 'weight', 'concurrencyLimit', 'modelAccess']) assert.deepEqual(a[key], original[key])
+    } else { assert.equal(job(id).status, 'review'); assert.equal(saves.length, beforeSave); assert.deepEqual(a, original) }
+  }
+  check('Direct callbacks without workspace metadata write verified original-workspace tokens without disabling; wrong user/workspace/subject are rejected')
   for (const id of ['fb_good', 'fb_disabled', 'fb_already_free']) {
     const a = fallbackAccount(id)
     if (id === 'fb_disabled') a.enabled = false
@@ -592,6 +603,18 @@ try {
   }
   assert.equal((await request('email-begin', { ...emailBody(), newEmail: 'bad' })).status, 400)
   assert.equal((await request('email-begin', { ...emailBody(), proxyUrl: 'ftp://invalid' })).status, 400)
+  assert.equal((await request('email-begin', { ...emailBody(), proxyUrl: '', outboundProxyId: 'missing-proxy' })).status, 400)
+  const platformEmail = { ...emailBody('email_platform'), proxyUrl: '', outboundProxyId: 'proxy_default' }
+  assert.equal((await request('email-begin', platformEmail)).status, 200)
+  await emailWait(platformEmail.requestId, r => r.step === 'email_code')
+  assert.ok(emailRecord(platformEmail.requestId).logs.some(l => l.message.includes('获取网页 CSRF') && l.message.includes('HTTP 200')))
+  assert.ok(emailRecord(platformEmail.requestId).logs.some(l => l.message.includes('耗时 ms 123')))
+  proxies.find(p => p.id === 'proxy_default').revision++
+  assert.equal((await request('email-code', { requestId: platformEmail.requestId, code: '445566' })).status, 400)
+  assert.equal(emailRecord(platformEmail.requestId).credentials, null)
+  proxies.find(p => p.id === 'proxy_default').revision--
+  await request('email-cancel', { requestId: platformEmail.requestId })
+  check('Email change resolves authenticated platform proxies and persists safe detailed stage/status/timing logs')
   const emailStart = emailBody()
   assert.equal((await request('email-begin', emailStart)).status, 200)
   assert.equal((await request('email-begin', emailStart)).status, 200)

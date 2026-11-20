@@ -40,7 +40,7 @@ pub async fn options(host: &HostClient) -> Result<Value, PluginFault> {
         .iter()
         .map(|g| json!({"id":g["id"],"name":g["name"]}))
         .collect::<Vec<_>>();
-    let proxies = catalog(host, "/api/admin/proxies").await?.iter().map(|p| json!({"id":p["id"],"name":p["name"],"endpoint":p["endpoint"],"enabled":p["enabled"],"hasAuthentication":p["hasAuthentication"]})).collect::<Vec<_>>();
+    let proxies = catalog(host, "/api/admin/proxies").await?.iter().map(|p| json!({"id":p["id"],"name":p["name"],"endpoint":p["endpoint"],"enabled":p["enabled"],"hasAuthentication":p["hasAuthentication"],"revision":p["revision"]})).collect::<Vec<_>>();
     Ok(json!({"groups":groups,"proxies":proxies}))
 }
 #[derive(Clone, Deserialize, Serialize)]
@@ -160,8 +160,15 @@ async fn resolve_proxy(
     host: &HostClient,
     request: &Import,
 ) -> Result<(String, Value), PluginFault> {
-    if request.outbound_proxy_id.is_empty() {
-        if !request.login_proxy_url.is_empty() {
+    resolve_login_proxy(host, &request.outbound_proxy_id, &request.login_proxy_url).await
+}
+pub(crate) async fn resolve_login_proxy(
+    host: &HostClient,
+    proxy_id: &str,
+    login_url: &str,
+) -> Result<(String, Value), PluginFault> {
+    if proxy_id.is_empty() {
+        if !login_url.is_empty() {
             return Err(fault("直连模式不能指定登录代理"));
         }
         return Ok((String::new(), Value::Null));
@@ -169,25 +176,21 @@ async fn resolve_proxy(
     let proxies = catalog(host, "/api/admin/proxies").await?;
     let p = proxies
         .iter()
-        .find(|p| p["id"] == request.outbound_proxy_id && p["enabled"] == true)
+        .find(|p| p["id"] == proxy_id && p["enabled"] == true)
         .ok_or_else(|| fault("所选代理不存在或已禁用"))?;
     let mut address = p["endpoint"]
         .as_str()
         .ok_or_else(|| fault("代理地址无效"))?
         .to_owned();
-    if !request.login_proxy_url.is_empty() {
-        address = request.login_proxy_url.clone()
+    if !login_url.is_empty() {
+        address = login_url.to_owned()
     } else if p["hasAuthentication"] == true {
         let data = admin(
             host,
             "GET",
             &query(
                 "/api/admin/proxies/accounts",
-                &[
-                    ("proxyId", &request.outbound_proxy_id),
-                    ("page", "1"),
-                    ("pageSize", "200"),
-                ],
+                &[("proxyId", proxy_id), ("page", "1"), ("pageSize", "200")],
             ),
             None,
         )

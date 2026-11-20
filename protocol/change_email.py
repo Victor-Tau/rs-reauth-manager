@@ -10,6 +10,7 @@ from vendor.lib.chatgpt_client import ChatGPTClient
 from vendor.lib.oauth_client import OAuthClient
 from vendor.lib.sentinel_token import build_sentinel_token
 from login_flow import LoginFlowMixin
+from email_trace import EmailTrace
 
 BASE = "https://chatgpt.com"
 CLIENT_ID = "TdJIcbe16WoTHtN95nyywh5E4yOo6ItG"
@@ -121,7 +122,7 @@ def web_login(chat, email, password, secret, emit):
     oauth.mfa_client, oauth.emit = TotpMfaClient(secret, max_attempts=1), emit
     if urlsplit(current).path in {"/email-verification", "/log-in/password"}:
         next_url = oauth.verify_password(password, current)
-    elif urlsplit(current).path == "/log-in":
+    elif urlsplit(current).path in {"/log-in", "/log-in-or-create-account"}:
         next_url = oauth._oauth_drive_external_login_for_continue(
             email=email, password=password, current_url=current,
             device_id=chat.device_id, user_agent=chat.ua, impersonate=chat.impersonate,
@@ -176,6 +177,7 @@ def run_change_email(data, emit):
         raise ValueError("proxy")
     chat = ChatGPTClient(proxy=proxy or None, verbose=False)
     stage = "login"
+    trace = EmailTrace(chat.session, emit)
     try:
         # No implicit replay of state-changing requests, including on requests fallback
         import requests
@@ -197,7 +199,7 @@ def run_change_email(data, emit):
             response = chat.session.post(BASE + "/backend-api/accounts/change_email/" + operation,
                                          json=payload, headers=headers, allow_redirects=False, timeout=30)
             if response.status_code != 200 or response.json() != {"success": True}:
-                emit("error", code="email_" + operation + "_rejected", httpStatus=response.status_code)
+                emit("error", code="email_" + operation + "_rejected", httpStatus=response.status_code, diagnostic=trace.diagnostic())
                 return
         emit("email_complete")
     except Exception as exc:
@@ -205,6 +207,7 @@ def run_change_email(data, emit):
         code = "email_verify_uncertain" if stage == "verify" else "email_" + stage + "_failed"
         if stage == "login" and isinstance(exc, ValueError) and str(exc) in {"email_login_human", "email_login_password_rejected", "email_login_mfa_rejected"}:
             code = str(exc)
-        emit("error", code=code)
+        reason = {"email_login_human": "email_otp_provider_required", "email_login_password_rejected": "invalid_username_or_password", "email_login_mfa_rejected": "mfa_totp_verification_failed", "identity": "fallback_identity", "phone": "phone_required", "authorization": "login_continue_failed"}.get(str(exc), str(exc) if isinstance(exc, ValueError) else None)
+        emit("error", code=code, diagnostic=trace.diagnostic(reason))
     finally:
         chat.session.close()

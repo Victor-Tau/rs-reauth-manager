@@ -75,7 +75,7 @@ class EmailChangeTests(unittest.TestCase):
                     if isinstance(verify, Exception):
                         raise verify
                     status, body = verify
-                elif url.endswith(("/log-in", "/log-in/password", "/mfa-challenge/fixture-factor", "/email-verification")):
+                elif url.endswith(("/log-in", "/log-in-or-create-account", "/log-in/password", "/mfa-challenge/fixture-factor", "/email-verification")):
                     pass
                 else:
                     raise AssertionError("Unexpected offline request " + method + " " + url)
@@ -124,6 +124,16 @@ class EmailChangeTests(unittest.TestCase):
         self.assertEqual(sum(url.endswith("/password/verify") for _, _, url, _ in calls), 1)
         self.assertEqual(sum(url.endswith("/mfa/verify") for _, _, url, _ in calls), 1)
 
+    def test_detailed_request_logs_and_failure_stage_are_public_only(self):
+        messages, _ = self.execute()
+        entries = [m['entry'] for m in messages if m['event'] == 'diagnostic']
+        for stage in ['web_home', 'web_csrf', 'web_signin', 'password', 'mfa_issue', 'mfa_verify', 'web_callback', 'web_session', 'change_begin', 'change_verify']:
+            self.assertTrue(any(e['action'] == 'request' and e['stage'] == stage for e in entries), stage)
+            self.assertTrue(any(e['action'] == 'response' and e['stage'] == stage and e['elapsedMs'] >= 0 and e['responseBytes'] >= 0 for e in entries), stage)
+        for args, stage, reason, status in [({'password_status': 401}, 'password', 'password_rejected', 401), ({'password_status': 429}, 'password', 'rate_limited', 429), ({'password_error': TimeoutError('private-url')}, 'password', 'request_timeout', None), ({'begin': (403, {})}, 'change_begin', 'http_rejected', 403)]:
+            failed, _ = self.execute(**args)
+            self.assertEqual(failed[-1]['diagnostic'], {'stage': stage, 'reason': reason, 'httpStatus': status})
+
     def test_captured_email_verification_landing_switches_to_password_then_totp(self):
         messages, calls = self.execute()
         self.assertEqual(messages[-1]['event'], 'email_complete')
@@ -134,7 +144,7 @@ class EmailChangeTests(unittest.TestCase):
         self.assertEqual([m.get('step') for m in messages if m.get('step') in {'email_login_code', 'email_code'}], ['email_code'])
 
     def test_explicit_password_page_and_normal_login_page_still_use_password_and_totp(self):
-        for path in ['/log-in/password', '/log-in']:
+        for path in ['/log-in/password', '/log-in', '/log-in-or-create-account']:
             messages, calls = self.execute(redirect='https://auth.openai.com' + path)
             self.assertEqual(messages[-1]['event'], 'email_complete')
             self.assertEqual(sum(url.endswith('/password/verify') for _, _, url, _ in calls), 1)
@@ -142,7 +152,8 @@ class EmailChangeTests(unittest.TestCase):
 
     def test_post_password_email_requirement_stops_without_fallback_or_replay(self):
         messages, calls = self.execute(login_mail=True)
-        self.assertEqual(messages[-1], {'event': 'error', 'code': 'email_login_human'})
+        self.assertEqual(messages[-1]['code'], 'email_login_human')
+        self.assertEqual(messages[-1]['diagnostic']['reason'], 'email_code_required')
         self.assertEqual(sum(url.endswith('/password/verify') for _, _, url, _ in calls), 1)
         self.assertFalse(any('/change_email/' in url for _, _, url, _ in calls))
 
@@ -176,7 +187,8 @@ class EmailChangeTests(unittest.TestCase):
 
     def test_verify_lost_response_is_uncertain_and_not_retried(self):
         messages, calls = self.execute(verify=TimeoutError("private-access private-password"))
-        self.assertEqual(messages[-1], {"event": "error", "code": "email_verify_uncertain"})
+        self.assertEqual(messages[-1]["code"], "email_verify_uncertain")
+        self.assertEqual(messages[-1]["diagnostic"], {"stage": "change_verify", "reason": "request_timeout", "httpStatus": None})
         self.assertEqual(sum(url.endswith("/change_email/verify") for _, _, url, _ in calls), 1)
 
     def test_verify_requires_exact_success_and_invalid_code_is_not_sent(self):

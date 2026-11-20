@@ -22,6 +22,8 @@ pub struct Begin {
     totp_secret: String,
     new_email: String,
     proxy_url: String,
+    #[serde(default)]
+    outbound_proxy_id: String,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -34,10 +36,13 @@ pub struct Record {
     message: String,
     created_at: u64,
     credentials: Option<String>,
+    #[serde(default)]
+    logs: Vec<crate::diagnostics::LogEntry>,
 }
 pub struct Pending {
     pub worker: Worker,
     credentials: String,
+    proxy_snapshot: Value,
 }
 #[derive(Default, Serialize, Deserialize)]
 struct History {
@@ -74,6 +79,16 @@ async fn save(
     records: &[Record],
     version: Option<u64>,
 ) -> Result<(), PluginFault> {
+    let mut records = records.to_vec();
+    let mut size = serde_json::to_vec(&json!({"records": records})).map_or(usize::MAX, |b| b.len());
+    if size > 240 * 1024 {
+        for record in &mut records {
+            while size > 239 * 1024 && !record.logs.is_empty() {
+                let removed = record.logs.remove(0);
+                size = size.saturating_sub(serde_json::to_vec(&removed).map_or(0, |b| b.len()) + 1);
+            }
+        }
+    }
     let value = json!({"records": records});
     if serde_json::to_vec(&value).map_or(usize::MAX, |b| b.len()) > 240 * 1024 {
         return Err(fault("换绑记录容量已满，请先复制并清理旧记录"));
@@ -161,6 +176,12 @@ pub async fn recover(host: &HostClient) -> Result<(), PluginFault> {
         }
         .into();
         record.message = "插件已重启，会话已结束，请先核对新旧邮箱，不会自动重试".into();
+        record
+            .logs
+            .push(crate::diagnostics::lifecycle(&record.message));
+        while record.logs.len() > 100 {
+            record.logs.remove(0);
+        }
         changed = true;
     }
     if changed {
@@ -171,7 +192,7 @@ pub async fn recover(host: &HostClient) -> Result<(), PluginFault> {
 pub async fn list(host: &HostClient) -> Result<Value, PluginFault> {
     let (records, _) = load(host).await?;
     Ok(
-        json!({"records": records.iter().rev().map(|r| json!({"requestId":r.request_id,"email":r.email,"newEmail":r.new_email,"status":r.status,"step":r.step,"message":r.message,"createdAt":r.created_at,"hasCredentials":r.credentials.is_some()})).collect::<Vec<_>>()}),
+        json!({"records": records.iter().rev().map(|r| json!({"requestId":r.request_id,"email":r.email,"newEmail":r.new_email,"status":r.status,"step":r.step,"message":r.message,"createdAt":r.created_at,"hasCredentials":r.credentials.is_some(),"logs":r.logs})).collect::<Vec<_>>()}),
     )
 }
 fn valid_email(value: &str) -> bool {
@@ -255,6 +276,12 @@ pub async fn begin(
         return Err(fault("该邮箱已有成功或待核对记录，请先检查历史记录"));
     }
     manager.runtime.prepare().await?;
+    let (proxy, proxy_snapshot) = if request.outbound_proxy_id.is_empty() {
+        (request.proxy_url.clone(), Value::Null)
+    } else {
+        crate::importing::resolve_login_proxy(host, &request.outbound_proxy_id, &request.proxy_url)
+            .await?
+    };
     records.push(Record {
         request_id: request.request_id.clone(),
         email: request.email.clone(),
@@ -264,14 +291,18 @@ pub async fn begin(
         message: "正在登录，换绑确认成功后保存新登录资料".into(),
         created_at: now(),
         credentials: None,
+        logs: vec![crate::diagnostics::lifecycle(
+            "已核对换绑资料及代理，创建密码与 2FA 登录会话",
+        )],
     });
     save(host, &records, version).await?;
-    let worker = manager.runtime.start(json!({"mode":"change_email","email":request.email,"notes":format!("{}----{}----{}",request.email,request.password,request.totp_secret),"newEmail":request.new_email,"proxy":request.proxy_url}), String::new(), Value::Null, request.request_id).await;
+    let worker = manager.runtime.start(json!({"mode":"change_email","email":request.email,"notes":format!("{}----{}----{}",request.email,request.password,request.totp_secret),"newEmail":request.new_email,"proxy":proxy}), String::new(), Value::Null, request.request_id).await;
     match worker {
         Ok(worker) => {
             manager.email_change = Some(Pending {
                 worker,
                 credentials,
+                proxy_snapshot,
             })
         }
         Err(error) => {
@@ -279,6 +310,9 @@ pub async fn begin(
             if let Some(record) = records.last_mut() {
                 record.status = "failed".into();
                 record.message = "协议会话启动失败，尚未换绑".into();
+                record
+                    .logs
+                    .push(crate::diagnostics::lifecycle(&record.message));
             }
             save(host, &records, version).await?;
             return Err(error);
@@ -295,14 +329,24 @@ pub async fn tick(manager: &mut Manager, host: &HostClient) -> Result<(), Plugin
         .iter_mut()
         .find(|r| r.request_id == pending.worker.request_id)
         .ok_or_else(|| fault("换绑记录不存在"))?;
-    let (step, result, closed) = {
-        let data = pending
+    let (step, result, closed, logs) = {
+        let mut data = pending
             .worker
             .output
             .lock()
             .map_err(|_| fault("换绑状态读取失败"))?;
-        (data.step.clone(), data.result.clone(), data.closed)
+        (
+            data.step.clone(),
+            data.result.clone(),
+            data.closed,
+            std::mem::take(&mut data.logs),
+        )
     };
+    let had_logs = !logs.is_empty();
+    record.logs.extend(logs);
+    while record.logs.len() > 100 {
+        record.logs.remove(0);
+    }
     let old = (
         record.status.clone(),
         record.step.clone(),
@@ -340,6 +384,9 @@ pub async fn tick(manager: &mut Manager, host: &HostClient) -> Result<(), Plugin
                 _ => "登录或发送验证码失败，可能需要额外验证，请核对账号和代理",
             }
             .into();
+            if result.get("diagnostic").is_some() {
+                record.message = crate::diagnostics::message(&result, &record.message);
+            }
             if let Some(status) = result["httpStatus"]
                 .as_u64()
                 .filter(|s| (100..=599).contains(s))
@@ -367,7 +414,16 @@ pub async fn tick(manager: &mut Manager, host: &HostClient) -> Result<(), Plugin
         .into();
         false
     };
+    if ended {
+        record
+            .logs
+            .push(crate::diagnostics::lifecycle(&record.message));
+    }
+    while record.logs.len() > 100 {
+        record.logs.remove(0);
+    }
     if ended
+        || had_logs
         || old
             != (
                 record.status.clone(),
@@ -427,12 +483,27 @@ pub async fn action(
         }
         .into();
         records[index].message = "会话已取消，已发送的请求无法撤回，请核对邮箱状态".into();
+        let entry = crate::diagnostics::lifecycle(&records[index].message);
+        records[index].logs.push(entry);
         save(host, &records, version).await?;
         manager.email_change.take();
         return list(host).await;
     }
     if !host::load(host).await?.0.enabled {
         return Err(fault("插件已关闭"));
+    }
+    if !pending.proxy_snapshot.is_null() {
+        let proxies = crate::importing::options(host).await?;
+        if !proxies["proxies"].as_array().is_some_and(|items| {
+            items.iter().any(|p| {
+                p["id"] == pending.proxy_snapshot["id"]
+                    && p["enabled"] == true
+                    && p["endpoint"] == pending.proxy_snapshot["endpoint"]
+                    && p["revision"] == pending.proxy_snapshot["revision"]
+            })
+        }) {
+            return Err(fault("所选平台代理已禁用或发生变化，请取消会话后重新选择"));
+        }
     }
     let step = pending
         .worker
@@ -456,6 +527,9 @@ pub async fn action(
         records[index].status = "verifying".into();
     }
     records[index].step = "code_submitted".into();
+    records[index].logs.push(crate::diagnostics::lifecycle(
+        "已保存待核对的新登录资料，即将提交新邮箱换绑确认",
+    ));
     save(host, &records, version).await?;
     let bytes =
         serde_json::to_vec(&json!({"code":request.code})).map_err(|_| fault("验证码编码失败"))?;

@@ -268,6 +268,9 @@ impl Runtime {
                                 "login" => "进入协议登录流程",
                                 "mfa" => "生成并提交 2FA 动态码",
                                 "logout" => "使用现有授权发送退出请求",
+                                "email_begin" => "开始发送新邮箱换绑验证码",
+                                "email_code" => "等待手动输入新邮箱换绑验证码",
+                                "email_verify" => "开始提交新邮箱换绑确认",
                                 _ => "协议进程正在处理",
                             };
                             data.logs.push(crate::diagnostics::lifecycle(message));
@@ -275,7 +278,7 @@ impl Runtime {
                     }
                     Some(
                         "complete" | "free_fallback" | "forced_workspace" | "forced_free"
-                        | "logout_complete" | "email_complete" | "error",
+                        | "logout_complete" | "email_complete" | "original_workspace" | "error",
                     ) => {
                         data.result = Some(value);
                         break;

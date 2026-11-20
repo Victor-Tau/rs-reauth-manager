@@ -13,6 +13,8 @@ if data.get("mode") == "change_email":
     assert data["proxy"] == "http://fixture:pass@127.0.0.1:21001"
     assert data["newEmail"].endswith("@example.com")
     assert "fixture-password" in data["notes"]
+    for stage in ['web_home', 'web_csrf', 'web_signin', 'password', 'mfa_issue', 'mfa_verify', 'web_callback', 'web_session', 'change_begin']:
+        print(json.dumps({'event': 'diagnostic', 'entry': {'action': 'response', 'stage': stage, 'method': 'POST', 'httpStatus': 200, 'elapsedMs': 123, 'responseBytes': 512, 'raw': 'fixture-password GEZDGNBVGY3TQOJQ'}}), flush=True)
     print(json.dumps({"event": "step", "step": "email_code"}), flush=True)
     assert json.loads(sys.stdin.readline())["code"] == "445566"
     if data["email"].startswith("email_lost"):
@@ -59,7 +61,7 @@ elif data["email"].startswith("force_") and not data.get("forceWorkspaceId"):
     print(json.dumps({"event": "error", "code": "workspace", "workspaces": [{"id": "alternate-workspace"}, {"id": "second-workspace"}]}), flush=True)
 elif data["email"].startswith("free_fallback_no_candidates") and not data.get("forceFree"):
     print(json.dumps({"event": "error", "code": "workspace", "workspaces": []}), flush=True)
-elif data["email"].startswith(("fb_", "force_", "free_fallback_no_candidates")):
+elif data["email"].startswith(("fb_", "force_", "free_fallback_no_candidates", "same_")):
     name = data["email"].split('@')[0]
     auth = {"chatgpt_account_id": "personal-workspace", "chatgpt_user_id": data.get("userId"), "chatgpt_plan_type": "free"}
     forced = bool(data.get("forceWorkspaceId"))
@@ -70,6 +72,13 @@ elif data["email"].startswith(("fb_", "force_", "free_fallback_no_candidates")):
             auth["chatgpt_user_id"] = "wrong-user"
         if name == "force_wrong_workspace":
             auth["chatgpt_account_id"] = "unconfirmed-workspace"
+    if name.startswith('same_'):
+        auth['chatgpt_account_id'] = data['accountId']
+        auth['chatgpt_plan_type'] = 'plus'
+        if name == 'same_wrong_user':
+            auth['chatgpt_user_id'] = 'wrong-user'
+        if name == 'same_wrong_workspace':
+            auth['chatgpt_account_id'] = 'wrong-workspace'
     if name == "fb_user":
         auth["chatgpt_user_id"] = "wrong-user"
     if name == "fb_workspace":
@@ -83,6 +92,12 @@ elif data["email"].startswith(("fb_", "force_", "free_fallback_no_candidates")):
         claims["exp"] = 1
     token = "fixture." + base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip('=') + ".signature"
     output = {"event": "free_fallback", "workspaceId": "personal-workspace", "originalWorkspaceId": data["accountId"], "originalWorkspaceUnavailable": name != "fb_proof", "tokens": {"access_token": token, "id_token": token, "refresh_token": "fallback-private-rt"}}
+    if name.startswith('same_'):
+        output.update(event='original_workspace', workspaceId=data['accountId'])
+        if name == 'same_wrong_subject':
+            claims['sub'] = 'wrong-subject'
+            token = "fixture." + base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip('=') + ".signature"
+            output['tokens'].update(id_token=token, access_token=token)
     if forced:
         output.update(event="forced_workspace", workspaceId=data["forceWorkspaceId"], administratorConfirmed=True)
         if name == "force_no_confirmation":

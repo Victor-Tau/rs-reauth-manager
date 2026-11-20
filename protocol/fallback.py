@@ -122,6 +122,24 @@ def recover_unbound_free(oauth, chat, authorize_url, data, authorize):
     return verified, workspace
 
 
+def recover_original(oauth, chat, authorize_url, data, authorize):
+    """Verify a direct callback's actual workspace using separate PKCE in the same session."""
+    from vendor.lib.utils import generate_pkce
+    if not data.get("userId") or not data.get("accountId"):
+        raise ValueError("fallback_identity")
+    verifier, challenge = generate_pkce()
+    state = secrets.token_urlsafe(32)
+    parsed = urlsplit(authorize_url)
+    params = {key: values[0] for key, values in parse_qs(parsed.query).items()}
+    params.update(state=state, code_challenge=challenge, code_challenge_method="S256")
+    oauth.oauth_client_id, oauth.oauth_redirect_uri = params["client_id"], params["redirect_uri"]
+    result = authorize(urlunsplit(parsed._replace(query=urlencode(params))), state, resume=True)
+    if not isinstance(result, dict) or result.get("ok") is not True or result.get("state") != state or not result.get("code"):
+        raise ValueError("fallback_identity")
+    tokens = oauth._exchange_code_for_tokens(result["code"], verifier, chat.ua, chat.impersonate)
+    return verify_free_tokens(tokens, data["email"], data["userId"], data["accountId"], force=True)
+
+
 def _choice(value, item=None):
     choice = {"id": value}
     name = item.get("name") or item.get("display_name") or item.get("title") if isinstance(item, dict) else None

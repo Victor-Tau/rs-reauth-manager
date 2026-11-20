@@ -71,6 +71,12 @@ try {
   await assert.rejects(api.emailChanges(), /换绑记录格式无效/)
   handler = () => json({ credentials: 123 })
   await assert.rejects(api.emailReveal('email-job'), /换绑资料格式无效/)
+  handler = () => json({ records: [{ ...emailRecord, logs: [{ at: 1, message: '密码验证 · HTTP 200' }] }] })
+  assert.equal((await api.emailChanges()).records[0].logs[0].message, '密码验证 · HTTP 200')
+  for (const logs of [[{ at: -1, message: 'bad' }], [{ at: 1, message: 'x'.repeat(1001) }], Array(101).fill({ at: 1, message: 'bad' })]) {
+    handler = () => json({ records: [{ ...emailRecord, logs }] })
+    await assert.rejects(api.emailChanges(), /换绑记录格式无效/)
+  }
   check('Email change uses registered bridge routes, separates code submission from credential retrieval and validates responses')
   const { emailWithSuffix, normalizeEmailSuffix } = await server.ssrLoadModule('/src/utilities/emailSuffix.ts')
   assert.equal(emailWithSuffix('abc@icloud.com', 'bb.com'), 'abc@bb.com')

@@ -60,7 +60,8 @@ export function parseEmailChanges(value: unknown): { records: EmailChangeRecord[
   if (!isRecord(value) || !Array.isArray(value.records) || value.records.length > 100 || !value.records.every(r => isRecord(r)
     && ['requestId', 'email', 'newEmail', 'step', 'message'].every(k => typeof r[k] === 'string')
     && typeof r.status === 'string' && ['running', 'verifying', 'success', 'failed', 'review', 'interrupted', 'cancelled'].includes(r.status)
-    && typeof r.createdAt === 'number' && Number.isSafeInteger(r.createdAt) && r.createdAt >= 0 && typeof r.hasCredentials === 'boolean'))
+    && typeof r.createdAt === 'number' && Number.isSafeInteger(r.createdAt) && r.createdAt >= 0 && typeof r.hasCredentials === 'boolean'
+    && (r.logs === undefined || Array.isArray(r.logs) && r.logs.length <= 100 && r.logs.every(log => isRecord(log) && typeof log.at === 'number' && Number.isSafeInteger(log.at) && log.at >= 0 && typeof log.message === 'string' && log.message.length <= 1000))))
     throw new Error('邮箱换绑记录格式无效')
   return value as unknown as { records: EmailChangeRecord[] }
 }

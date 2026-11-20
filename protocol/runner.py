@@ -95,7 +95,7 @@ def run(data):
     from vendor.lib.oauth_client import OAuthClient
     from totp import TotpMfaClient
     from login_flow import LoginFlowMixin
-    from fallback import WorkspaceUnavailable, personal_candidate, recover_free, recover_unbound_free, workspace_choices
+    from fallback import WorkspaceUnavailable, personal_candidate, recover_free, recover_unbound_free, recover_original, workspace_choices
 
     target = str(data.get("accountId") or "")
     forced = data.get("forceWorkspaceId")
@@ -352,6 +352,12 @@ def run(data):
             if not oauth.workspace_matches():
                 if importing:
                     raise ValueError("workspace")
+                session = oauth._decode_oauth_session_cookie() or {}
+                if not forced and not session.get("workspaces") and not session.get("workspace_id") and not oauth.workspace_candidates and data.get("userId"):
+                    oauth.trace('original_verify', stage='identity')
+                    tokens = recover_original(oauth, chat, authorize_url, data, authorize)
+                    emit("original_workspace", workspaceId=target, originalWorkspaceId=target, tokens=tokens)
+                    return
                 fallback(personal_candidate(oauth._decode_oauth_session_cookie(), target))
                 return
             callback = urlunsplit((redirect.scheme, redirect.netloc, redirect.path, urlencode({"state": state, "code": result["code"]}), ""))

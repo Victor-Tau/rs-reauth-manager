@@ -95,13 +95,19 @@ class FallbackGuards(unittest.TestCase):
 
 
 class RealVendorFreeRecovery(unittest.TestCase):
-    def execute(self, selection_page=False, bad_state=False, bad_tokens=False, user="original-user", force=False):
+    def execute(self, selection_page=False, bad_state=False, bad_tokens=False, user="original-user", force=False, original=False, wrong_original_workspace=False):
         messages, calls = [], []
         exchanged = tokens()
         if force:
             for key in ["id_token", "access_token"]:
                 payload = json.loads(base64.urlsafe_b64decode(exchanged[key].split('.')[1] + '=='))
                 payload[AUTH]["chatgpt_plan_type"] = "team"
+                exchanged[key] = jwt(payload)
+        if original:
+            for key in ['id_token', 'access_token']:
+                payload = json.loads(base64.urlsafe_b64decode(exchanged[key].split('.')[1] + '=='))
+                payload[AUTH]['chatgpt_account_id'] = 'wrong-workspace' if wrong_original_workspace else 'original-workspace'
+                payload[AUTH]['chatgpt_plan_type'] = 'plus'
                 exchanged[key] = jwt(payload)
         if bad_tokens:
             exchanged["refresh_token"] = ""
@@ -116,7 +122,7 @@ class RealVendorFreeRecovery(unittest.TestCase):
             def __init__(self):
                 self.headers = {}
                 self.cookies = RequestsCookieJar()
-                self.cookies.set("oai-client-auth-session", json.dumps({"workspaces": [{"id": "personal-workspace", "is_personal": True}]}), domain="auth.openai.com")
+                self.cookies.set("oai-client-auth-session", json.dumps({} if original else {"workspaces": [{"id": "personal-workspace", "is_personal": True}]}), domain="auth.openai.com")
 
             def request(self, method, url, **kwargs):
                 testcase.assertEqual(method, "GET")
@@ -150,6 +156,28 @@ class RealVendorFreeRecovery(unittest.TestCase):
         self.messages, self.calls = messages, calls
         with patch.object(chatgpt_client, "create_http_session", side_effect=session), patch.object(oauth_client, "create_http_session", side_effect=session), patch.object(socket, "create_connection", side_effect=AssertionError("Network forbidden")), patch.object(runner, "emit", side_effect=lambda event, **fields: messages.append({"event": event, **fields})):
             runner.run(data)
+
+    def test_no_workspace_metadata_verifies_original_with_separate_pkce(self):
+        self.execute(original=True)
+        result = self.messages[-1]
+        self.assertEqual(result['event'], 'original_workspace')
+        self.assertEqual(result['workspaceId'], 'original-workspace')
+        self.assertEqual(result['originalWorkspaceId'], 'original-workspace')
+        self.assertEqual(len(self.calls), 3)
+        self.assertTrue(any(m.get('entry', {}).get('action') == 'original_verify' for m in self.messages))
+        self.assertNotIn('fixture-private-rt', json.dumps(self.messages[:-1]))
+        self.assertFalse(any(m['event'] == 'complete' for m in self.messages))
+
+    def test_no_workspace_metadata_rejects_other_workspace_or_incomplete_tokens(self):
+        for args in [{'wrong_original_workspace': True}, {'bad_tokens': True}]:
+            with self.subTest(args=args), self.assertRaisesRegex(ValueError, 'fallback_identity'):
+                self.execute(original=True, **args)
+            self.assertFalse(any(m['event'] in {'original_workspace', 'complete'} for m in self.messages))
+
+    def test_no_workspace_metadata_wrong_state_stops_before_exchange(self):
+        self.execute(original=True, bad_state=True)
+        self.assertEqual(self.messages[-1]['event'], 'error')
+        self.assertFalse(any(call[0] == 'POST' for call in self.calls))
 
     def test_direct_callback_recovers_with_fresh_pkce_same_proxy_real_exchange(self):
         self.execute()

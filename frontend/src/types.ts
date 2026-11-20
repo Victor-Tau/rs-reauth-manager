@@ -21,8 +21,8 @@ export interface ImportRequest {
 }
 export interface ImportProxy { id: string; name: string; endpoint: string; enabled: boolean; hasAuthentication: boolean }
 export interface Options { groups: AccountGroup[]; proxies: ImportProxy[] }
-export interface EmailChangeRequest { requestId: string; email: string; password: string; totpSecret: string; newEmail: string; proxyUrl: string }
+export interface EmailChangeRequest { requestId: string; email: string; password: string; totpSecret: string; newEmail: string; proxyUrl: string; outboundProxyId?: string }
 export interface EmailChangeRecord {
   requestId: string; email: string; newEmail: string; status: 'running' | 'verifying' | 'success' | 'failed' | 'review' | 'interrupted' | 'cancelled'
-  step: string; message: string; createdAt: number; hasCredentials: boolean
+  step: string; message: string; createdAt: number; hasCredentials: boolean; logs?: { at: number; message: string }[]
 }

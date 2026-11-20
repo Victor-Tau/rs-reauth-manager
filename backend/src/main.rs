@@ -532,10 +532,12 @@ impl Manager {
                 } else if output["event"] == "free_fallback"
                     || output["event"] == "forced_workspace"
                     || output["event"] == "forced_free"
+                    || output["event"] == "original_workspace"
                 {
                     job.step = "saving".into();
                     let forced = output["event"] == "forced_workspace";
                     let forced_free = output["event"] == "forced_free";
+                    let original_workspace = output["event"] == "original_workspace";
                     if (forced
                         && (job.force_workspace_id.as_deref() != output["workspaceId"].as_str()
                             || job.force_workspace_id.is_none()))
@@ -549,7 +551,12 @@ impl Manager {
                     match recovery::commit(host, &job.account_id, &current.snapshot, &output).await
                     {
                         Ok(()) => {
-                            if forced {
+                            if original_workspace {
+                                job.finish(
+                                    "success",
+                                    "已核对令牌中的原用户和工作区，新授权已写回原账号",
+                                );
+                            } else if forced {
                                 job.finish(
                                     "success",
                                     "管理员已确认，其他工作区授权已写回原账号，已停止调度",

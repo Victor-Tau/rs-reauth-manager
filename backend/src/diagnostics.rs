@@ -28,6 +28,7 @@ pub fn trace(entry: &Value) -> Option<LogEntry> {
         "mfa_verified" => "2FA 验证已通过",
         "phone_required" => "上游要求添加手机号或手机验证",
         "authorization_resume" => "复用已验证会话继续原授权（仅一次）",
+        "original_verify" => "会话未提供工作区，使用独立 PKCE 核对原用户与原工作区授权",
         _ => return None,
     };
     let stage = message(
@@ -113,6 +114,14 @@ pub fn message(output: &Value, fallback: &str) -> String {
         "token_exchange" => "交换授权令牌",
         "identity" => "校验授权身份",
         "logout" => "退出所有登录",
+        "web_home" => "建立 ChatGPT 网页会话",
+        "web_csrf" => "获取网页 CSRF",
+        "web_signin" => "创建网页登录授权",
+        "web_session" => "读取并核对网页登录身份",
+        "web_callback" => "完成网页登录回调",
+        "sentinel" => "获取 Sentinel 校验",
+        "change_begin" => "发送新邮箱换绑验证码",
+        "change_verify" => "提交新邮箱换绑确认",
         _ => "登录协议",
     };
     let reason = match diagnostic["reason"].as_str().unwrap_or_default() {
@@ -149,7 +158,7 @@ pub fn message(output: &Value, fallback: &str) -> String {
         "token_exchange_failed" => "授权码换取令牌未成功，未写回",
         "state_mismatch" => "授权回调 state 校验未通过，未写回",
         "workspace_unmatched" => "无法匹配原账号工作区，已停止写回",
-        "identity_unconfirmed" => "新授权的同一用户或 Free 工作区校验未通过，未写回",
+        "identity_unconfirmed" => "新授权的用户或预期工作区校验未通过，未写回",
         _ => "未取得可公开的具体错误，未保存上游原始响应",
     };
     let mut message = format!("{stage}：{reason}");

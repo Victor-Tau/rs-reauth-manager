@@ -15,6 +15,11 @@ STAGES = {
     '/api/accounts/organization/select': 'organization',
     '/oauth/token': 'token_exchange',
     '/backend-api/accounts/logout_all': 'logout',
+    '/backend-api/accounts/change_email/begin': 'change_begin',
+    '/backend-api/accounts/change_email/verify': 'change_verify',
+    '/api/auth/csrf': 'web_csrf',
+    '/api/auth/signin/openai': 'web_signin',
+    '/api/auth/session': 'web_session',
 }
 REASONS = {
     'invalid_username_or_password': ('password', 'password_rejected'),
@@ -50,8 +55,10 @@ REASONS = {
 def stage_for_url(url):
     try:
         parsed = urlsplit(url)
-        if parsed.scheme == 'https' and parsed.netloc == 'chatgpt.com' and parsed.path == '/backend-api/accounts/logout_all':
-            return 'logout'
+        if parsed.scheme == 'https' and parsed.netloc == 'sentinel.openai.com' and parsed.path == '/backend-api/sentinel/req':
+            return 'sentinel'
+        if parsed.scheme == 'https' and parsed.netloc == 'chatgpt.com':
+            return STAGES.get(parsed.path, 'web_home' if parsed.path == '/' else 'web_callback' if parsed.path == '/api/auth/callback/openai' else 'unknown')
         if parsed.scheme != 'https' or parsed.netloc != 'auth.openai.com':
             return 'unknown'
         path = parsed.path
@@ -96,7 +103,7 @@ def describe_failure(result=None, *, attempt=None, exception=None):
     status = attempt.get('httpStatus')
     status = status if type(status) is int and 100 <= status <= 599 else None
     stage = attempt.get('stage', 'unknown')
-    if not isinstance(stage, str) or stage not in {*STAGES.values(), 'mfa_factor', 'consent', 'phone', 'unknown'}:
+    if not isinstance(stage, str) or stage not in {*STAGES.values(), 'mfa_factor', 'consent', 'phone', 'web_home', 'web_callback', 'sentinel', 'unknown'}:
         stage = 'unknown'
     if stage == 'unknown':
         protocol = result.get('oauth_protocol')

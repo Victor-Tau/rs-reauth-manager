@@ -53,11 +53,13 @@ fn validate(output: &Value, original: &Value) -> Result<(Value, Value), PluginFa
     let email = text(original, "email")?;
     let forced = output["event"] == "forced_workspace" && output["administratorConfirmed"] == true;
     let forced_free = output["event"] == "forced_free" && output["administratorConfirmed"] == true;
-    if (!forced
+    let original_workspace = output["event"] == "original_workspace";
+    if (!original_workspace
+        && !forced
         && !forced_free
         && (output["event"] != "free_fallback" || output["originalWorkspaceUnavailable"] != true))
         || output["originalWorkspaceId"] != original["accountId"]
-        || workspace == text(original, "accountId")?
+        || (original_workspace != (workspace == text(original, "accountId")?))
     {
         return Err(fault(IDENTITY_ERROR));
     }
@@ -79,9 +81,10 @@ fn validate(output: &Value, original: &Value) -> Result<(Value, Value), PluginFa
                 .as_str()
                 .or_else(|| auth["user_id"].as_str())
                 != Some(user)
-            || !auth["chatgpt_plan_type"]
-                .as_str()
-                .is_some_and(|p| !p.trim().is_empty() && (forced || p.eq_ignore_ascii_case("free")))
+            || !auth["chatgpt_plan_type"].as_str().is_some_and(|p| {
+                !p.trim().is_empty()
+                    && (forced || original_workspace || p.eq_ignore_ascii_case("free"))
+            })
         {
             return Err(fault(IDENTITY_ERROR));
         }
@@ -136,6 +139,13 @@ pub async fn commit(
     )
     .await?;
     let mut facts = credential.facts;
+    let original_subject = facts
+        .material
+        .get("principal")
+        .and_then(|p| p["oauth_subject"].as_str());
+    if output["event"] == "original_workspace" && original_subject.is_none_or(str::is_empty) {
+        return Err(fault(IDENTITY_ERROR));
+    }
     if credential.account_id != id
         || credential.provider_id != "openai"
         || Some(credential.credential_revision) != snapshot["credentialRevision"].as_u64()
@@ -176,7 +186,8 @@ pub async fn commit(
     facts.next_refresh_at_ms = None;
     // 读取凭据后再次校验，先停止调度再变更工作区身份
     unchanged(&detail(host, id).await?, snapshot, original)?;
-    if original["enabled"] != false {
+    let same_workspace = output["event"] == "original_workspace";
+    if !same_workspace && original["enabled"] != false {
         admin(
             host,
             "POST",
@@ -188,7 +199,9 @@ pub async fn commit(
     }
     let result = async {
         let mut disabled = original.clone();
-        disabled["enabled"] = json!(false);
+        if !same_workspace {
+            disabled["enabled"] = json!(false);
+        }
         unchanged(&detail(host, id).await?, snapshot, &disabled)?;
         let result: AuthSaveResult = auth_call(
             host,
@@ -238,6 +251,10 @@ pub async fn commit(
     }
     .await;
     result.map_err(|_: PluginFault| {
-        fault("已执行停止调度，但工作区授权写回未确认，请人工核对；不会自动重试")
+        fault(if same_workspace {
+            "原工作区授权写回未确认，请人工核对；不会自动重试"
+        } else {
+            "已执行停止调度，但工作区授权写回未确认，请人工核对；不会自动重试"
+        })
     })
 }

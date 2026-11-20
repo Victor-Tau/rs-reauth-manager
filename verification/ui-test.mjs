@@ -17,6 +17,7 @@ try {
       document.addEventListener('DOMContentLoaded', () => { for (const [key, value] of Object.entries(tokens)) document.documentElement.style.setProperty(key, value) })
       let enabled = true, jobs = []
       const emailRecords = [], emailSecrets = new Map()
+      window.__emailRecords = emailRecords
       let emailSuffix = ''
       let automation = { enabled: false, intervalMinutes: 15, cooldownHours: 24, allGroups: true, groupIds: [], includeUngrouped: true, statuses: ['error'], allPlans: true, plans: [], enabledOnly: true }
       const account = { id: 'fixture', name: 'fixture', email: 'fixture@example.com', enabled: true, planType: 'free', status: 'error', accessTokenExpiresAt: null, proxy: null, notesValid: true, groups: [{ id: 'g1', name: '测试组' }, { id: 'g2', name: '共享组' }] }
@@ -34,7 +35,7 @@ try {
           result = { emailSuffix }
         }
         else if (input.path === 'api/email-begin') {
-          emailRecords.push({ requestId: data.requestId, email: data.email, newEmail: data.newEmail, status: 'running', step: 'email_code', message: '换绑验证码已发送，请输入新邮箱收到的验证码', createdAt: 1, hasCredentials: false })
+          emailRecords.push({ requestId: data.requestId, email: data.email, newEmail: data.newEmail, status: 'running', step: 'email_code', message: '换绑验证码已发送，请输入新邮箱收到的验证码', createdAt: Date.now(), hasCredentials: false, logs: Array.from({ length: 60 }, (_, i) => ({ at: i + 1, message: `阶段 ${i} · 收到响应 · HTTP 200 · 耗时 ms 123` })) })
           emailSecrets.set(data.requestId, `${data.newEmail}----${data.password}----${data.totpSecret}`)
           result = { records: emailRecords }
         }
@@ -243,6 +244,10 @@ try {
     assert.equal(await scope.getByLabel('换绑账号密码', { exact: true }).inputValue(), ' private password ')
     assert.equal(await scope.getByLabel('换绑新邮箱', { exact: true }).inputValue(), 'old@bb.com')
     await scope.getByLabel('换绑新邮箱', { exact: true }).fill('new@example.com')
+    await scope.getByRole('combobox', { name: '换绑代理选择', exact: true }).click()
+    await scope.getByRole('option', { name: '测试代理 · http://127.0.0.1:21001', exact: true }).click()
+    await scope.getByRole('combobox', { name: '换绑代理选择', exact: true }).click()
+    await scope.getByRole('option', { name: '手动输入代理', exact: true }).click()
     await scope.getByLabel('换绑 IP 代理', { exact: true }).fill('socks5://fixture:pass@127.0.0.1:21001')
     await scope.getByRole('button', { name: '登录并发送换绑验证码', exact: true }).click()
     await scope.getByLabel('邮箱验证码', { exact: true }).waitFor()
@@ -252,11 +257,29 @@ try {
     await scope.getByRole('button', { name: '账户邮箱换绑', exact: true }).click()
     await scope.getByLabel('邮箱验证码', { exact: true }).fill('445566')
     await scope.getByRole('button', { name: '确认换绑并保存资料', exact: true }).click()
-    await scope.getByText('换绑成功', { exact: true }).waitFor()
+    await scope.getByText('换绑成功 ·', { exact: false }).first().waitFor()
     assert.equal(await scope.getByLabel('换绑账号密码', { exact: true }).inputValue(), '')
     assert.equal(await scope.getByLabel('换绑账号 2FA 密钥', { exact: true }).inputValue(), '')
     assert.ok(!(await scope.getByRole('region', { name: '账户邮箱换绑', exact: true }).innerText()).includes('private password'))
     assert.equal(await child.evaluate(() => window.__calls.filter(c => c.path === 'api/email-reveal').length), 0)
+    const panelLayout = await child.evaluate(() => {
+      const panels = [...document.querySelectorAll('.email-panel')].map(e => e.getBoundingClientRect().toJSON())
+      const form = document.querySelector('.email-form-column').getBoundingClientRect().toJSON()
+      const scrolls = [...document.querySelectorAll('.email-panel-scroll')].map(e => ({ height: e.clientHeight, scroll: e.scrollHeight, overflow: getComputedStyle(e).overflowY }))
+      return { panels, form, scrolls }
+    })
+    assert.equal(panelLayout.panels.length, 2)
+    assert.ok(panelLayout.panels.every(p => p.height > 390 && p.height < 500))
+    assert.equal(panelLayout.scrolls[0].overflow, 'auto'); assert.ok(panelLayout.scrolls[0].scroll > panelLayout.scrolls[0].height)
+    if (width === 1440) { assert.ok(panelLayout.panels[0].x > panelLayout.form.x); assert.ok(panelLayout.panels[0].width <= 430) }
+    await child.evaluate(() => { const r = window.__emailRecords[0]; window.__emailRecords.push({ ...r, requestId: 'older-attempt', status: 'failed', hasCredentials: false, createdAt: r.createdAt - 1000, logs: [{ at: 1, message: '历史失败阶段 · HTTP 403' }] }) })
+    await scope.getByRole('button', { name: '刷新记录', exact: true }).click()
+    assert.equal(await scope.getByLabel('换绑记录列表', { exact: true }).locator('article').count(), 1)
+    await scope.getByRole('combobox', { name: 'old@example.com 的尝试记录', exact: true }).click()
+    await scope.getByRole('option', { name: /未完成/ }).click()
+    await scope.getByText('历史失败阶段 · HTTP 403', { exact: false }).waitFor()
+    await scope.getByRole('button', { name: '删除记录', exact: true }).click()
+    await scope.getByRole('dialog', { name: '删除换绑记录', exact: true }).getByRole('button', { name: '确认删除', exact: true }).click()
     await scope.getByRole('button', { name: '查看已保存资料', exact: true }).click()
     assert.equal(await scope.getByLabel('已保存换绑资料', { exact: true }).inputValue(), `new@example.com---- private password ----${pastedSecret}`)
     await scope.getByRole('button', { name: '隐藏资料', exact: true }).click()

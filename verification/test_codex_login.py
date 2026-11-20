@@ -10,6 +10,9 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "protocol"))
 import runner
 from test_protocol import EMAIL, SECRET, URL, desktop_url
+from urllib.parse import parse_qs, urlsplit
+from test_fallback import jwt
+import time
 from requests.cookies import RequestsCookieJar
 from vendor.lib import chatgpt_client, oauth_client
 
@@ -17,7 +20,7 @@ from vendor.lib import chatgpt_client, oauth_client
 class CodexLoginTests(unittest.TestCase):
     def execute(self, *, plan="team", mode="import", target="", state="fixture",
                 mfa_status=200, password_status=200, session_email=EMAIL,
-                workspaces=None, landing="/log-in-or-create-account", cookie=True, bounce=False):
+                workspaces=None, landing="/log-in-or-create-account", cookie=True, bounce=False, verify_original=False, token_workspace=None):
         calls, messages, sessions = [], [], []
         choices = workspaces if workspaces is not None else [
             {"id": "team-workspace", "name": "Example Team", "kind": "organization"},
@@ -38,10 +41,20 @@ class CodexLoginTests(unittest.TestCase):
             def close(self):
                 self.closed = True
 
+            def post(self, url, **kwargs):
+                return self.request("POST", url, **kwargs)
+
             def request(self, method, url, **kwargs):
                 calls.append((self, method, url, kwargs))
                 body, status, headers = {}, 200, {"Content-Type": "application/json"}
-                if method == "GET" and url == URL:
+                if verify_original and method == 'GET' and url.startswith('https://auth.openai.com/oauth/authorize?') and url != URL:
+                    fresh_state = parse_qs(urlsplit(url).query)['state'][0]
+                    status, headers = 302, {'Location': f'http://127.0.0.1:1455/auth/callback?code=fresh-private-code&state={fresh_state}'}
+                elif verify_original and method == 'POST' and url.endswith('/oauth/token'):
+                    payload = {'sub': 'original-subject', 'email': EMAIL, 'exp': int(time.time()) + 3600, 'https://api.openai.com/auth': {'chatgpt_account_id': token_workspace or target, 'chatgpt_user_id': 'original-user', 'chatgpt_plan_type': plan}}
+                    token = jwt(payload)
+                    body = {'id_token': token, 'access_token': token, 'refresh_token': 'private-fresh-refresh'}
+                elif method == "GET" and url == URL:
                     self.authorizations += 1
                     status, headers = (307, {"Location": desktop_url()}) if bounce and self.authorizations == 1 else (302, {"Location": "https://auth.openai.com" + landing})
                 elif method == "GET" and url == desktop_url():
@@ -90,6 +103,8 @@ class CodexLoginTests(unittest.TestCase):
                 return types.SimpleNamespace(status_code=status, url=url, headers=headers, text=json.dumps(body), json=lambda: body)
 
         data = {"mode": mode, "email": EMAIL, "notes": f"{EMAIL}----fixture-password----{SECRET}", "authorizationUrl": desktop_url(), "accountId": target, "proxy": ""}
+        if verify_original:
+            data["userId"] = "original-user"
         with patch.object(chatgpt_client, "create_http_session", side_effect=lambda **kw: Session()), \
              patch.object(oauth_client, "create_http_session", side_effect=lambda **kw: Session()), \
              patch.object(oauth_client, "build_sentinel_token", side_effect=lambda *a, **kw: "private-" + kw["flow"]), \
@@ -137,6 +152,21 @@ class CodexLoginTests(unittest.TestCase):
                 messages, calls = self.execute(plan=plan)
                 self.assertEqual(messages[-1]["event"], "complete")
                 self.assertFalse(any(u.endswith("/workspace/select") for _, _, u, _ in calls))
+
+    def test_password_totp_direct_callback_reauth_verifies_original_without_replaying_credentials(self):
+        for plan in ['plus', 'pro']:
+            messages, calls = self.execute(plan=plan, mode='reauth', target='personal-workspace', workspaces=[], verify_original=True)
+            self.assertEqual(messages[-1]['event'], 'original_workspace')
+            self.assertEqual(messages[-1]['workspaceId'], 'personal-workspace')
+            self.assertEqual(sum(u.endswith('/password/verify') for _, _, u, _ in calls), 1)
+            self.assertEqual(sum(u.endswith('/mfa/verify') for _, _, u, _ in calls), 1)
+            self.assertEqual(sum(u.endswith('/oauth/token') for _, _, u, _ in calls), 1)
+            self.assertNotIn('private-fresh-refresh', json.dumps(messages[:-1]))
+
+    def test_password_totp_direct_callback_rejects_token_for_other_workspace(self):
+        messages, calls = self.execute(plan='plus', mode='reauth', target='personal-workspace', workspaces=[], verify_original=True, token_workspace='other-workspace')
+        self.assertEqual(messages[-1], {'event': 'error', 'code': 'fallback_identity'})
+        self.assertEqual(sum(u.endswith('/oauth/token') for _, _, u, _ in calls), 1)
 
     def test_personal_reauth_still_requires_original_workspace_proof(self):
         messages, _ = self.execute(plan="plus", mode="reauth", target="personal-workspace", workspaces=[{"id": "personal-workspace"}])
