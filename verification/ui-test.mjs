@@ -17,6 +17,7 @@ try {
       document.addEventListener('DOMContentLoaded', () => { for (const [key, value] of Object.entries(tokens)) document.documentElement.style.setProperty(key, value) })
       let enabled = true, jobs = []
       const emailRecords = [], emailSecrets = new Map()
+      let emailSuffix = ''
       let automation = { enabled: false, intervalMinutes: 15, cooldownHours: 24, allGroups: true, groupIds: [], includeUngrouped: true, statuses: ['error'], allPlans: true, plans: [], enabledOnly: true }
       const account = { id: 'fixture', name: 'fixture', email: 'fixture@example.com', enabled: true, planType: 'free', status: 'error', accessTokenExpiresAt: null, proxy: null, notesValid: true, groups: [{ id: 'g1', name: '测试组' }, { id: 'g2', name: '共享组' }] }
       const accounts = [account, { ...account, id: 'second', email: 'second@example.com', status: 'quota_paused', groups: [{ id: 'g2', name: '共享组' }] }, { ...account, id: 'ungrouped', email: 'ungrouped@example.com', groups: [] }]
@@ -28,6 +29,10 @@ try {
         if (input.path === 'api/accounts') result = { accounts }
         else if (input.path === 'api/jobs') result = { jobs, enabled, automation }
         else if (input.path === 'api/email-changes') result = { records: emailRecords }
+        else if (input.path === 'api/email-settings') {
+          if (input.method === 'POST') emailSuffix = data.emailSuffix
+          result = { emailSuffix }
+        }
         else if (input.path === 'api/email-begin') {
           emailRecords.push({ requestId: data.requestId, email: data.email, newEmail: data.newEmail, status: 'running', step: 'email_code', message: '换绑验证码已发送，请输入新邮箱收到的验证码', createdAt: 1, hasCredentials: false })
           emailSecrets.set(data.requestId, `${data.newEmail}----${data.password}----${data.totpSecret}`)
@@ -222,9 +227,21 @@ try {
     console.log(`PASS group filters, logout confirmation, config save and import payload/secret clearing at ${width}px`)
     await scope.getByRole('button', { name: '账户邮箱换绑', exact: true }).click()
     await scope.getByRole('button', { name: '登录并发送换绑验证码', exact: true }).waitFor({ state: 'visible' })
+    await scope.getByLabel('换绑邮箱后缀', { exact: true }).fill(' @BB.COM ')
+    await scope.getByRole('button', { name: '保存邮箱后缀', exact: true }).click()
+    await scope.getByText('邮箱后缀已保存为 bb.com', { exact: true }).waitFor()
+    await scope.getByLabel('换绑原邮箱', { exact: true }).fill('abc@icloud.com')
+    assert.equal(await scope.getByLabel('换绑新邮箱', { exact: true }).inputValue(), 'abc@bb.com')
+    await scope.getByRole('button', { name: '账号重新授权', exact: true }).click()
+    await scope.getByRole('button', { name: '账户邮箱换绑', exact: true }).click()
+    await scope.getByLabel('换绑邮箱后缀', { exact: true }).waitFor()
+    await scope.getByLabel('换绑原邮箱', { exact: true }).fill('abc+tag@icloud.com')
+    await scope.getByText('已保存：bb.com', { exact: true }).waitFor()
+    assert.equal(await scope.getByLabel('换绑新邮箱', { exact: true }).inputValue(), 'abc+tag@bb.com')
     await paste('粘贴换绑登录资料', `old@example.com---- private password ----${pastedSecret}`)
     assert.equal(await scope.getByLabel('换绑原邮箱', { exact: true }).inputValue(), 'old@example.com')
     assert.equal(await scope.getByLabel('换绑账号密码', { exact: true }).inputValue(), ' private password ')
+    assert.equal(await scope.getByLabel('换绑新邮箱', { exact: true }).inputValue(), 'old@bb.com')
     await scope.getByLabel('换绑新邮箱', { exact: true }).fill('new@example.com')
     await scope.getByLabel('换绑 IP 代理', { exact: true }).fill('socks5://fixture:pass@127.0.0.1:21001')
     await scope.getByRole('button', { name: '登录并发送换绑验证码', exact: true }).click()
@@ -246,6 +263,9 @@ try {
     await scope.getByRole('button', { name: '删除记录', exact: true }).click()
     await scope.getByRole('dialog', { name: '删除换绑记录', exact: true }).getByRole('button', { name: '确认删除', exact: true }).click()
     await scope.getByText('暂无换绑记录', { exact: true }).waitFor()
+    await scope.getByLabel('换绑邮箱后缀', { exact: true }).fill('')
+    await scope.getByRole('button', { name: '保存邮箱后缀', exact: true }).click()
+    await scope.getByText('邮箱后缀已清除，新邮箱可手动填写', { exact: true }).waitFor()
     const emailSize = await child.evaluate(() => ({ width: document.documentElement.clientWidth, scroll: document.documentElement.scrollWidth }))
     assert.ok(emailSize.scroll <= emailSize.width + 1, JSON.stringify(emailSize)); assert.deepEqual(errors, [])
     console.log(`PASS email change paste, proxy, manual code, session resume, saved credential reveal/hide/delete at ${width}px`)

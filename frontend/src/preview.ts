@@ -1,6 +1,7 @@
 import { applyTheme, createTheme } from '@codex-proxy/ui/theme'
 import { defaultAutomation } from './types'
 import type { Account, Job, EmailChangeRecord } from './types'
+import { normalizeEmailSuffix } from './utilities/emailSuffix'
 export function installPreview() {
   if (window.codexProxyPlugin) return
   const theme = new URLSearchParams(location.search).get('theme') === 'dark' ? 'dark' : 'light'
@@ -10,6 +11,7 @@ export function installPreview() {
   let enabled = true
   const emailChanges: EmailChangeRecord[] = []
   const emailCredentials = new Map<string, string>()
+  let emailSuffix = ''
   let automation = defaultAutomation()
   const diagnostics = ['创建 2FA 验证挑战：上游未成功创建 2FA 验证挑战，并非已确认验证码错误（最后响应 HTTP 403）', '提交 2FA 动态码：上游限制登录频率，不自动重试（最后响应 HTTP 429）', '密码验证：请求超时，保留原代理，不自动重试', '2FA 验证未通过，请检查原账号备注']
   jobs.push(...diagnostics.map((message, i): Job => ({ requestId: `preview-diagnostic:${i}`, accountId: `acct_preview_${i + 1}`, status: 'failed', step: 'failed', message, startedAt: Date.now() - 10000, finishedAt: Date.now() })))
@@ -20,6 +22,10 @@ export function installPreview() {
     if (input.path === 'api/jobs') return encode({ jobs, enabled, automation })
     if (input.path === 'api/options') return encode({ groups: [{ id: 'preview-primary', name: '示例部署组' }, { id: 'preview-shared', name: '跨区域共享账号组' }], proxies: [{ id: 'preview-proxy', name: '示例代理', endpoint: 'http://127.0.0.1:21001', enabled: true, hasAuthentication: false }] })
     if (input.path === 'api/email-changes') return encode({ records: [...emailChanges].reverse() })
+    if (input.path === 'api/email-settings') {
+      if (input.method === 'POST') emailSuffix = normalizeEmailSuffix(body.emailSuffix)
+      return encode({ emailSuffix })
+    }
     if (input.path === 'api/email-begin') {
       if (!enabled) throw new Error('插件已关闭')
       if (!emailChanges.some(r => r.requestId === body.requestId)) {

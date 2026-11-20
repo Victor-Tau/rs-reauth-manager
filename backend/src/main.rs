@@ -245,6 +245,8 @@ fn registration() -> ManagementRegistration {
             ("POST", "api/import"),
             ("POST", "api/import-batch"),
             ("GET", "api/email-changes"),
+            ("GET", "api/email-settings"),
+            ("POST", "api/email-settings"),
             ("POST", "api/email-begin"),
             ("POST", "api/email-code"),
             ("POST", "api/email-cancel"),
@@ -729,6 +731,7 @@ async fn handle(
             "api/accounts" => rows(&call.host).await,
             "api/options" => importing::options(&call.host).await,
             "api/email-changes" => email_change::list(&call.host).await,
+            "api/email-settings" => email_change::settings(&call.host, None).await,
             "api/jobs" => {
                 let queue = host::load(&call.host).await?.0;
                 Ok(json!({"jobs":queue.jobs,"enabled":queue.enabled,"automation":queue.automation}))
@@ -741,6 +744,9 @@ async fn handle(
     }
     if call.request.path == "api/email-begin" {
         return email_change::begin(manager, &call.host, &call.payload).await;
+    }
+    if call.request.path == "api/email-settings" {
+        return email_change::settings(&call.host, Some(&call.payload)).await;
     }
     if [
         "api/email-code",

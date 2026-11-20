@@ -2,11 +2,13 @@ import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { randomUUID } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import { createScheduler } from './rpc-scheduler.mjs'
 
 const binary = process.argv[2] || fileURLToPath(new URL(`../backend/target/debug/reauth-manager${process.platform === 'win32' ? '.exe' : ''}`, import.meta.url))
 const python = process.env.RS_REAUTH_TEST_PYTHON || process.env.PYTHON || (process.platform === 'win32' ? 'python' : 'python3')
 const worker = fileURLToPath(new URL('./fake-worker.py', import.meta.url))
+const stateSchema = JSON.parse(readFileSync(new URL('../plugin.json', import.meta.url), 'utf8')).state[0].schema
 const innerAuthorization = 'https://auth.openai.com/oauth/authorize?' + new URLSearchParams({ response_type: 'code', client_id: 'fixture', redirect_uri: 'http://127.0.0.1:1455/auth/callback', state: 'fixture', code_challenge: 'a'.repeat(43), code_challenge_method: 'S256' })
 const nativeAuthorization = 'https://chatgpt.com/codex/desktop-auth?' + new URLSearchParams({ authorize_url: innerAuthorization, codex_streamlined_login: 'true', no_universal_links: '1' })
 const make = (id, prefix = id) => ({ id, provider: 'openai', name: `team+${prefix}@example.com+workspace3`, email: `${prefix}@example.com`, authenticationKind: 'oauth', enabled: id !== 'disabled', planType: 'team', status: 'error', notes: `${prefix}@example.com----fixture-password----GEZDGNBVGY3TQOJQ`, outboundProxyEndpoint: 'http://127.0.0.1:21001', accountId: 'original-workspace', groups: [{ id: 'g1', name: 'Team' }], weight: 3, concurrencyLimit: null, modelAccess: { mode: 'all' }, quotaLimits: { weekly: 90 }, hasRefreshToken: true, accessTokenExpiresAt: '2026-10-23T00:00:00Z', capacity: { usedSlots: 0, totalSlots: null } })
@@ -83,7 +85,9 @@ async function callback(meta, payload) {
   }
   if (meta.method === 'host.state.get') return result(meta.id, { record: records.get(data.key) || null })
   if (meta.method === 'host.state.put') {
-    if (failEmailConfirmationSave && data.key === 'email-changes' && data.value.some(r => r.status === 'verifying')) return result(meta.id, {})
+    assert.equal(stateSchema.type, 'object')
+    assert.ok(data.value !== null && typeof data.value === 'object' && !Array.isArray(data.value), 'host.state.put must match the manifest object schema')
+    if (failEmailConfirmationSave && data.key === 'email-changes' && data.value.records.some(r => r.status === 'verifying')) return result(meta.id, {})
     const old = records.get(data.key)
     assert.equal(data.expected_version, old?.version ?? null)
     const version = (old?.version || 0) + 1
@@ -91,7 +95,7 @@ async function callback(meta, payload) {
     assert.ok(Buffer.byteLength(serialized) <= 262144, 'Private state exceeds the manifest value limit')
     for (const secret of ['fixture-password', 'fixture:pass', 'secret-code', 'refreshToken', 'authorizationUrl', 'callbackUrl', 'fallback-private-rt', 'access_token', 'id_token', 'refresh_token', 'fixture-cookie']) {
       if (data.key === 'email-changes' && secret === 'fixture-password') {
-        for (const record of data.value) {
+        for (const record of data.value.records) {
           assert.ok(!JSON.stringify({ ...record, credentials: null }).includes(secret))
           if (record.credentials) assert.ok(['verifying', 'success', 'review'].includes(record.status))
         }
@@ -210,7 +214,7 @@ const check = name => { passed++; console.log(`PASS ${name}`) }
 try {
   await start()
   check('RPC v7 handshake uses SDK default stage budgets')
-  const reg = JSON.parse((await call('management.register', {}, Buffer.alloc(0), 'registration')).payload.toString()); assert.equal(reg.resources.length, 3); assert.equal(reg.routes.length, 19); assert.ok(reg.routes.some(r => r.method === 'POST' && r.path === 'api/logout')); assert.ok(reg.routes.some(r => r.method === 'POST' && r.path === 'api/import-batch')); assert.ok(reg.routes.some(r => r.path === 'api/email-begin')); assert.ok(!reg.resources.some(r => r.path.includes('runtime'))); check('Only UI resources are exposed, protocol runtime stays private')
+  const reg = JSON.parse((await call('management.register', {}, Buffer.alloc(0), 'registration')).payload.toString()); assert.equal(reg.resources.length, 3); assert.equal(reg.routes.length, 21); assert.ok(reg.routes.some(r => r.method === 'POST' && r.path === 'api/logout')); assert.ok(reg.routes.some(r => r.method === 'POST' && r.path === 'api/import-batch')); assert.ok(reg.routes.some(r => r.path === 'api/email-begin')); assert.ok(!reg.resources.some(r => r.path.includes('runtime'))); check('Only UI resources are exposed, protocol runtime stays private')
   const largeContext = { method: 'GET', uri: '/plugin/api/jobs', http_version: 'HTTP/1.1', headers: [{ name: 'x-fixture', value: Buffer.alloc(70000, 'x').toString('base64') }], peer_addr: null, client_ip: null }
   const contextual = await call('management.handle', { method: 'GET', path: 'api/jobs', query: '', content_type: null, headers: [] }, Buffer.alloc(0), 'management', largeContext)
   assert.equal(contextual.result.status, 200); assert.ok(!contextual.payload.includes('fixture-private-context')); check('RPC v7 carries large request context separately from metadata and business JSON')
@@ -568,8 +572,20 @@ try {
   await stop(); await start(); assert.equal(records.get('queue').value.auto_attempts.logout_good, 9007199254740991)
   check('Logout intent blocks automatic relogin, including disabled-account scans and plugin restart')
 
+  assert.deepEqual((await request('email-settings')).value, { emailSuffix: '' })
+  const beforeSettings = records.get('email-settings')
+  for (const value of ['abc@bb.com', 'https://bb.com', 'bb.com/path', 'bb..com', '-bb.com', 'bb.\ncom']) {
+    assert.equal((await request('email-settings', { emailSuffix: value })).status, 400)
+    assert.equal(records.get('email-settings'), beforeSettings)
+  }
+  assert.deepEqual((await request('email-settings', { emailSuffix: ' @BB.COM ' })).value, { emailSuffix: 'bb.com' })
+  assert.deepEqual(records.get('email-settings').value, { emailSuffix: 'bb.com' })
+  await stop(); await start()
+  assert.deepEqual((await request('email-settings')).value, { emailSuffix: 'bb.com' })
+  check('Email suffix settings use the manifest object schema, reject invalid domains, normalize input and survive restart')
+
   const emailBody = (prefix = 'email_login') => ({ requestId: randomUUID(), email: `${prefix}@example.com`, password: 'fixture-password', totpSecret: 'GEZDGNBVGY3TQOJQ', newEmail: `${prefix}_new@example.com`, proxyUrl: 'http://fixture:pass@127.0.0.1:21001' })
-  const emailRecord = id => records.get('email-changes').value.find(r => r.requestId === id)
+  const emailRecord = id => records.get('email-changes').value.records.find(r => r.requestId === id)
   async function emailWait(id, predicate) {
     for (let i = 0; i < 70; i++) { await tick(); if (predicate(emailRecord(id))) return emailRecord(id); await sleep(25) }
     throw new Error('Email flow did not reach expected state: ' + JSON.stringify({ ...emailRecord(id), credentials: null }))
@@ -622,6 +638,9 @@ try {
   assert.equal((await request('email-code', { requestId: cancelEmail.requestId, code: '445566' })).status, 400)
   await request('email-delete', { requestId: emailStart.requestId }); assert.equal(emailRecord(emailStart.requestId), undefined)
   check('Email records survive restart, pending confirmation becomes review, disabling kills the session, and completed records can be deleted')
+  assert.deepEqual((await request('email-settings', { emailSuffix: '' })).value, { emailSuffix: '' })
+  assert.ok(records.get('email-changes').value.records.some(r => r.requestId === lostEmail.requestId && r.credentials))
+  check('Clearing the saved suffix while disabled preserves existing email-change history and credentials')
 
   await stop(); assert.equal(errors, ''); console.log(`Verified ${passed} protocol scenarios`)
 } catch (error) { child?.kill(); console.error(error); process.exitCode = 1 }

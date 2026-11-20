@@ -10,6 +10,7 @@ const manifest = JSON.parse(await readFile(join(root, 'plugin.json'), 'utf8'))
 const pending = new Map()
 const ready = Promise.withResolvers()
 const callbacks = []
+const stateRecords = new Map()
 const scheduler = createScheduler(send)
 const child = spawn(join(root, manifest.main), [], { stdio: ['pipe', 'pipe', 'pipe'] })
 const exited = once(child, 'exit')
@@ -51,11 +52,21 @@ child.stdout.on('data', chunk => {
         ready.resolve()
       } else if (metadata.type === 'callback') {
         callbacks.push(metadata.method)
-        assert.equal(metadata.method, 'host.state.get')
         assert.equal(data.namespace, 'reauth-manager')
-        assert.ok(['queue', 'email-changes'].includes(data.key))
-        assert.deepEqual(Object.keys(data).sort(), ['key', 'namespace'])
-        send({ type: 'result', id: metadata.id }, { record: null })
+        assert.ok(['queue', 'email-changes', 'email-settings'].includes(data.key))
+        if (metadata.method === 'host.state.get') {
+          assert.deepEqual(Object.keys(data).sort(), ['key', 'namespace'])
+          send({ type: 'result', id: metadata.id }, { record: stateRecords.get(data.key) || null })
+        } else {
+          assert.equal(metadata.method, 'host.state.put')
+          assert.equal(manifest.state[0].schema.type, 'object')
+          assert.ok(data.value && typeof data.value === 'object' && !Array.isArray(data.value), 'Saved state must match the manifest object schema')
+          const old = stateRecords.get(data.key)
+          assert.equal(data.expected_version, old?.version ?? null)
+          const version = (old?.version || 0) + 1
+          stateRecords.set(data.key, { value: data.value, version, schema_version: 1 })
+          send({ type: 'result', id: metadata.id }, { version })
+        }
       } else {
         const waiter = pending.get(metadata.id)
         assert.ok(waiter, `Unexpected frame: ${metadata.type}`)
@@ -100,6 +111,17 @@ try {
   const history = await call('management.handle', { method: 'GET', path: 'api/email-changes', query: '', content_type: null, headers: [] }, Buffer.alloc(0), 'management')
   assert.equal(history.result.status, 200, history.payload.toString())
   assert.deepEqual(JSON.parse(history.payload), { records: [] })
+  stateRecords.set('email-changes', { value: { records: [{ requestId: 'release-smoke-record', email: 'old@example.com', newEmail: 'new@example.com', status: 'failed', step: 'login', message: 'Offline fixture', createdAt: 1, credentials: null }] }, version: 1, schema_version: 1 })
+  const deletedHistory = await call('management.handle', { method: 'POST', path: 'api/email-delete', query: '', content_type: 'application/json', headers: [] }, Buffer.from(JSON.stringify({ requestId: 'release-smoke-record' })), 'management')
+  assert.equal(deletedHistory.result.status, 200, deletedHistory.payload.toString())
+  assert.deepEqual(stateRecords.get('email-changes').value, { records: [] })
+  const settingsRequest = (method, body = Buffer.alloc(0)) => call('management.handle', { method, path: 'api/email-settings', query: '', content_type: method === 'POST' ? 'application/json' : null, headers: [] }, body, 'management')
+  const savedSettings = await settingsRequest('POST', Buffer.from(JSON.stringify({ emailSuffix: ' @BB.COM ' })))
+  assert.equal(savedSettings.result.status, 200, savedSettings.payload.toString())
+  assert.deepEqual(JSON.parse(savedSettings.payload), { emailSuffix: 'bb.com' })
+  const readSettings = await settingsRequest('GET')
+  assert.equal(readSettings.result.status, 200)
+  assert.deepEqual(JSON.parse(readSettings.payload), { emailSuffix: 'bb.com' })
   stopping = true
   send({ type: 'shutdown' })
   child.stdin.end()

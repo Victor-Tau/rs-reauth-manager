@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ZButton } from '@codex-proxy/ui/button'
 import { ZCard } from '@codex-proxy/ui/card'
 import { ZInput } from '@codex-proxy/ui/input'
@@ -11,9 +11,17 @@ import type { EmailChangeRecord, Job } from '../types'
 import { requestId } from '../utilities/requestId'
 import { parseImportCredentials } from '../utilities/importCredentials'
 import { displayTime, isActive } from '../format'
+import { emailWithSuffix, normalizeEmailSuffix } from '../utilities/emailSuffix'
 
 const props = defineProps<{ enabled: boolean; jobs: Job[] }>()
 const email = ref(''), password = ref(''), secret = ref(''), newEmail = ref(''), proxy = ref(''), code = ref('')
+const suffix = ref(''), settingsLoaded = ref(false), savedSuffix = ref(''), suffixMessage = ref('')
+const suffixPreview = computed(() => emailWithSuffix(email.value || 'abc@icloud.com', suffix.value))
+watch([email, suffix], ([currentEmail, currentSuffix], [oldEmail, oldSuffix]) => {
+  const generated = emailWithSuffix(currentEmail, currentSuffix)
+  if (generated) newEmail.value = generated
+  else if (newEmail.value === emailWithSuffix(oldEmail, oldSuffix)) newEmail.value = ''
+}, { flush: 'sync' })
 const records = ref<EmailChangeRecord[]>([]), busy = ref(false), loading = ref(false), ready = ref(false), error = ref('')
 const revealed = ref(''), revealId = ref(''), deleteId = ref('')
 const showDelete = computed({ get: () => !!deleteId.value, set: value => { if (!value) deleteId.value = '' } })
@@ -40,11 +48,27 @@ async function refresh() {
   if (loading.value) return
   loading.value = true
   try {
+    if (!settingsLoaded.value) {
+      const settings = await api.emailSettings()
+      if (disposed) return
+      suffix.value = savedSuffix.value = settings.emailSuffix
+      settingsLoaded.value = true
+    }
     await api.tick()
     const data = await api.emailChanges()
     if (!disposed) { records.value = data.records; ready.value = true }
   } catch (e) { if (!disposed) error.value = (e as Error).message }
   finally { loading.value = false }
+}
+async function saveSuffix() {
+  if (busy.value || !settingsLoaded.value) return
+  busy.value = true; error.value = ''; suffixMessage.value = ''
+  try {
+    const settings = await api.saveEmailSettings(normalizeEmailSuffix(suffix.value))
+    suffix.value = savedSuffix.value = settings.emailSuffix
+    suffixMessage.value = settings.emailSuffix ? `邮箱后缀已保存为 ${settings.emailSuffix}` : '邮箱后缀已清除，新邮箱可手动填写'
+  } catch (e) { error.value = (e as Error).message }
+  finally { busy.value = false }
 }
 async function poll() {
   await refresh()
@@ -108,6 +132,14 @@ onUnmounted(() => { disposed = true; clearTimeout(timer); password.value = ''; s
     <Notice v-if="!props.enabled" tone="warning">请先开启页面顶部的插件总开关</Notice>
     <Notice v-if="error" tone="danger" role="alert">{{ error }}</Notice>
     <Notice v-if="queueActive" tone="info">授权队列正在处理，请等待队列结束后发起换绑</Notice>
+    <ZCard as="div" class="settings-card" title="新邮箱后缀">
+      <div class="settings-fields">
+        <label class="field-label">换绑后缀<ZInput v-model="suffix" :maxlength="254" :disabled="busy || !settingsLoaded" placeholder="例如 bb.com，留空可取消自动填写" aria-label="换绑邮箱后缀" /><small>保留原邮箱 @ 前的部分，自动生成新邮箱，生成后仍可手动修改</small></label>
+        <p v-if="suffixPreview" class="muted">预览：{{ email || 'abc@icloud.com' }} → {{ suffixPreview }}</p>
+        <div class="form-actions"><ZButton :loading="busy" :disabled="busy || !settingsLoaded" @click="saveSuffix">保存邮箱后缀</ZButton><span class="muted">{{ suffix !== savedSuffix ? '后缀尚未保存' : savedSuffix ? `已保存：${savedSuffix}` : '未设置自动换绑后缀' }}</span></div>
+        <Notice v-if="suffixMessage" tone="success" role="status">{{ suffixMessage }}</Notice>
+      </div>
+    </ZCard>
     <ZCard v-if="active" as="div" class="settings-card" title="当前换绑会话">
       <div class="settings-fields">
         <p>{{ active.email }} → {{ active.newEmail }}</p>

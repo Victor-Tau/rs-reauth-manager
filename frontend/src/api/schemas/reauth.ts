@@ -68,3 +68,7 @@ export function parseEmailCredentials(value: unknown): string {
   if (!isRecord(value) || typeof value.credentials !== 'string' || value.credentials.length > 2000) throw new Error('换绑资料格式无效')
   return value.credentials
 }
+export function parseEmailSettings(value: unknown): { emailSuffix: string } {
+  if (!isRecord(value) || typeof value.emailSuffix !== 'string' || value.emailSuffix.length > 253) throw new Error('邮箱后缀设置格式无效')
+  return { emailSuffix: value.emailSuffix }
+}

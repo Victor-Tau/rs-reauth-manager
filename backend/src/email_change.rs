@@ -39,6 +39,20 @@ pub struct Pending {
     pub worker: Worker,
     credentials: String,
 }
+#[derive(Default, Serialize, Deserialize)]
+struct History {
+    records: Vec<Record>,
+}
+fn decode_history(value: Value) -> Result<Vec<Record>, PluginFault> {
+    // 兼容旧模拟环境中可能保存的数组，所有新写入均遵守宿主对象 schema
+    if value.is_array() {
+        serde_json::from_value(value).map_err(|_| fault("换绑记录格式无效"))
+    } else {
+        serde_json::from_value::<History>(value)
+            .map(|history| history.records)
+            .map_err(|_| fault("换绑记录格式无效"))
+    }
+}
 async fn load(host: &HostClient) -> Result<(Vec<Record>, Option<u64>), PluginFault> {
     let reply = host
         .call(
@@ -51,10 +65,7 @@ async fn load(host: &HostClient) -> Result<(Vec<Record>, Option<u64>), PluginFau
     let data: StateGetResult =
         serde_json::from_value(reply.result).map_err(|_| fault("换绑记录读取失败"))?;
     match data.record {
-        Some(record) => Ok((
-            serde_json::from_value(record.value).map_err(|_| fault("换绑记录格式无效"))?,
-            Some(record.version),
-        )),
+        Some(record) => Ok((decode_history(record.value)?, Some(record.version))),
         None => Ok((vec![], None)),
     }
 }
@@ -63,7 +74,7 @@ async fn save(
     records: &[Record],
     version: Option<u64>,
 ) -> Result<(), PluginFault> {
-    let value = serde_json::to_value(records).map_err(|_| fault("换绑记录编码失败"))?;
+    let value = json!({"records": records});
     if serde_json::to_vec(&value).map_or(usize::MAX, |b| b.len()) > 240 * 1024 {
         return Err(fault("换绑记录容量已满，请先复制并清理旧记录"));
     }
@@ -71,6 +82,70 @@ async fn save(
     let _: StatePutResult =
         serde_json::from_value(reply.result).map_err(|_| fault("换绑资料保存失败"))?;
     Ok(())
+}
+#[derive(Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Settings {
+    email_suffix: String,
+}
+fn normalize_suffix(value: &str) -> Result<String, PluginFault> {
+    let suffix = value
+        .trim()
+        .strip_prefix('@')
+        .unwrap_or(value.trim())
+        .to_ascii_lowercase();
+    if suffix.is_empty() {
+        return Ok(suffix);
+    }
+    if suffix.len() > 253
+        || !suffix.contains('.')
+        || suffix.split('.').any(|label| {
+            label.is_empty()
+                || label.len() > 63
+                || label.starts_with('-')
+                || label.ends_with('-')
+                || !label
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || c == b'-')
+        })
+    {
+        return Err(fault(
+            "邮箱后缀无效，请填写域名，例如 bb.com，不含邮箱用户名或网址",
+        ));
+    }
+    Ok(suffix)
+}
+async fn load_settings(host: &HostClient) -> Result<(Settings, Option<u64>), PluginFault> {
+    let reply = host
+        .call(
+            "host.state.get",
+            json!({"namespace":"reauth-manager","key":"email-settings"}),
+            vec![],
+        )
+        .await
+        .map_err(|e| e.into_plugin_fault())?;
+    let data: StateGetResult =
+        serde_json::from_value(reply.result).map_err(|_| fault("邮箱后缀设置读取失败"))?;
+    match data.record {
+        Some(record) => Ok((
+            serde_json::from_value(record.value).map_err(|_| fault("邮箱后缀设置格式无效"))?,
+            Some(record.version),
+        )),
+        None => Ok((Settings::default(), None)),
+    }
+}
+pub async fn settings(host: &HostClient, payload: Option<&[u8]>) -> Result<Value, PluginFault> {
+    let (saved, version) = load_settings(host).await?;
+    let Some(payload) = payload else {
+        return Ok(json!(saved));
+    };
+    let mut request: Settings =
+        serde_json::from_slice(payload).map_err(|_| fault("邮箱后缀设置格式无效"))?;
+    request.email_suffix = normalize_suffix(&request.email_suffix)?;
+    let reply = host.call("host.state.put", json!({"namespace":"reauth-manager","key":"email-settings","value":request,"expected_version":version}), vec![]).await.map_err(|e| e.into_plugin_fault())?;
+    let _: StatePutResult =
+        serde_json::from_value(reply.result).map_err(|_| fault("邮箱后缀设置保存失败"))?;
+    Ok(json!(request))
 }
 fn active(record: &Record) -> bool {
     matches!(record.status.as_str(), "running" | "verifying")
