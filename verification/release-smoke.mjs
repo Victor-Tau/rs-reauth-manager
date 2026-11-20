@@ -52,7 +52,9 @@ child.stdout.on('data', chunk => {
       } else if (metadata.type === 'callback') {
         callbacks.push(metadata.method)
         assert.equal(metadata.method, 'host.state.get')
-        assert.deepEqual(data, { namespace: 'reauth-manager', key: 'queue' })
+        assert.equal(data.namespace, 'reauth-manager')
+        assert.ok(['queue', 'email-changes'].includes(data.key))
+        assert.deepEqual(Object.keys(data).sort(), ['key', 'namespace'])
         send({ type: 'result', id: metadata.id }, { record: null })
       } else {
         const waiter = pending.get(metadata.id)
@@ -81,6 +83,8 @@ try {
   await ready.promise
   const registration = JSON.parse((await call('management.register', {})).payload)
   assert.equal(registration.resources.length, 3)
+  assert.ok(registration.routes.some(route => route.method === 'POST' && route.path === 'api/email-begin'))
+  assert.ok(registration.routes.some(route => route.method === 'POST' && route.path === 'api/email-code'))
   assert.ok(!registration.resources.some(resource => resource.path.includes('runtime')))
   const probe = () => call('management.handle', { method: 'POST', path: 'api/runtime-check', query: '', content_type: 'application/json', headers: [] }, Buffer.from('{}'), 'management')
   const first = await probe()
@@ -93,6 +97,9 @@ try {
   assert.equal(second.result.status, 200)
   assert.deepEqual(JSON.parse(second.payload), { ready: true })
   assert.deepEqual(await runtimeDirectories(), directories)
+  const history = await call('management.handle', { method: 'GET', path: 'api/email-changes', query: '', content_type: null, headers: [] }, Buffer.alloc(0), 'management')
+  assert.equal(history.result.status, 200, history.payload.toString())
+  assert.deepEqual(JSON.parse(history.payload), { records: [] })
   stopping = true
   send({ type: 'shutdown' })
   child.stdin.end()

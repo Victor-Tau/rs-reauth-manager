@@ -4,6 +4,7 @@ import Notice from './components/Notice.vue'
 import StatTile from './components/StatTile.vue'
 import AutomationPage from './components/AutomationPage.vue'
 import ImportPage from './components/ImportPage.vue'
+import EmailChangePage from './components/EmailChangePage.vue'
 import JobLogs from './components/JobLogs.vue'
 import { Search, RefreshCw, KeyRound, Square, X, LogOut, CircleCheck, ListChecks, Settings2, UserPlus, Inbox, Hourglass, CircleX, ShieldAlert } from '@lucide/vue'
 import { ZConfigProvider } from '@codex-proxy/ui/config-provider'
@@ -24,7 +25,7 @@ import { displayTime, expiryInfo, isActive, jobTone, planLabel, planType, progre
 import { useReauthManager } from './useReauthManager'
 import type { Account } from './types'
 
-const section = ref<'accounts' | 'config' | 'import'>('accounts')
+const section = ref<'accounts' | 'config' | 'import' | 'email'>('accounts')
 const { accounts, jobs, selected, loading, busy, enabled, error, search, plan, group, groupOptions, filter, page, pageSize, showConfirm, targets, jobOf, resultOf, ready, logoutReady, showLogout, logoutTargets, confirmLogout, submitLogout, chosenLogout, active, success, failed, eligibleCount, planOptions, filtered, visible, pageSelected, pageIndeterminate, loaded, chosen, selectOne, selectPage, showResults, load, setEnabled, confirm, submit, cancel, pageCandidates, showForce, forceTarget, forceSource, forceWorkspace, forceConfirmed, canForce, openForce, submitForce, showFreeFallback, freeTarget, freeSource, freeConfirmed, canFreeFallback, openFreeFallback, submitFreeFallback } = useReauthManager()
 const logRequestId = ref('')
 const logJob = computed(() => jobs.value.find(job => job.requestId === logRequestId.value))
@@ -57,6 +58,7 @@ const resultTone = (a: Account) => jobTone(resultOf(a))
         <ZButton :type="section === 'accounts' ? 'primary' : 'default'" :variant="section === 'accounts' ? 'solid' : 'plain'" @click="section = 'accounts'"><template #icon><ListChecks :size="16" /></template>账号重新授权</ZButton>
         <ZButton :type="section === 'config' ? 'primary' : 'default'" :variant="section === 'config' ? 'solid' : 'plain'" @click="section = 'config'"><template #icon><Settings2 :size="16" /></template>参数配置</ZButton>
         <ZButton :type="section === 'import' ? 'primary' : 'default'" :variant="section === 'import' ? 'solid' : 'plain'" @click="section = 'import'"><template #icon><UserPlus :size="16" /></template>账号导入</ZButton>
+        <ZButton :type="section === 'email' ? 'primary' : 'default'" :variant="section === 'email' ? 'solid' : 'plain'" @click="section = 'email'"><template #icon><KeyRound :size="16" /></template>账户邮箱换绑</ZButton>
       </nav>
       <ZSwitch class="master-switch" :model-value="enabled" :disabled="busy" :label="enabled ? '插件已开启' : '插件已关闭'" title="关闭后停止当前队列，并阻止新的重新授权任务" aria-label="插件总开关" @update:model-value="setEnabled" />
     </header>
@@ -64,6 +66,7 @@ const resultTone = (a: Account) => jobTone(resultOf(a))
     <Notice v-if="section !== 'accounts' && error" tone="danger" role="alert">{{ error }}</Notice>
     <AutomationPage v-if="section === 'config'" :enabled="enabled" :accounts="accounts" @saved="load" />
     <ImportPage v-if="section === 'import'" :enabled="enabled" :jobs="jobs" @submitted="load" />
+    <EmailChangePage v-if="section === 'email'" :enabled="enabled" :jobs="jobs" />
     <section v-show="section === 'accounts'" class="accounts-page" aria-label="账号重新授权列表">
       <div class="stats" role="group" aria-label="授权任务统计">
         <StatTile v-for="tile in tiles" :key="tile.key" :label="tile.label" :value="tile.value" :caption="tile.caption" :tone="tile.tone" :icon="tile.icon" :hint="tile.hint" :pressed="filter === tile.key" @select="showResults(tile.key)" />

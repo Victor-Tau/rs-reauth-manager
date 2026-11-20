@@ -8,7 +8,23 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "protocol"))
 from runner import authorization
 
-data = json.load(sys.stdin)
+data = json.loads(sys.stdin.readline())
+if data.get("mode") == "change_email":
+    assert data["proxy"] == "http://fixture:pass@127.0.0.1:21001"
+    assert data["newEmail"].endswith("@example.com")
+    assert "fixture-password" in data["notes"]
+    if data["email"].startswith("email_login"):
+        print(json.dumps({"event": "step", "step": "email_login_code"}), flush=True)
+        assert json.loads(sys.stdin.readline())["code"] == "112233"
+    print(json.dumps({"event": "step", "step": "email_code"}), flush=True)
+    assert json.loads(sys.stdin.readline())["code"] == "445566"
+    if data["email"].startswith("email_lost"):
+        print(json.dumps({"event": "error", "code": "email_verify_uncertain", "raw": "fixture-password"}), flush=True)
+    elif data["email"].startswith("email_restart"):
+        time.sleep(60)
+    else:
+        print(json.dumps({"event": "email_complete"}), flush=True)
+    sys.exit(0)
 if data.get("mode") == "logout":
     assert data["proxy"] == ("" if data["email"].startswith("logout_direct") else "http://fixture:pass@127.0.0.1:21001")
     assert data["accessToken"] == "old-access"

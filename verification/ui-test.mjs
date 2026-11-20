@@ -16,6 +16,7 @@ try {
     await page.addInitScript(tokens => {
       document.addEventListener('DOMContentLoaded', () => { for (const [key, value] of Object.entries(tokens)) document.documentElement.style.setProperty(key, value) })
       let enabled = true, jobs = []
+      const emailRecords = [], emailSecrets = new Map()
       let automation = { enabled: false, intervalMinutes: 15, cooldownHours: 24, allGroups: true, groupIds: [], includeUngrouped: true, statuses: ['error'], allPlans: true, plans: [], enabledOnly: true }
       const account = { id: 'fixture', name: 'fixture', email: 'fixture@example.com', enabled: true, planType: 'free', status: 'error', accessTokenExpiresAt: null, proxy: null, notesValid: true, groups: [{ id: 'g1', name: '测试组' }, { id: 'g2', name: '共享组' }] }
       const accounts = [account, { ...account, id: 'second', email: 'second@example.com', status: 'quota_paused', groups: [{ id: 'g2', name: '共享组' }] }, { ...account, id: 'ungrouped', email: 'ungrouped@example.com', groups: [] }]
@@ -26,6 +27,22 @@ try {
         let result
         if (input.path === 'api/accounts') result = { accounts }
         else if (input.path === 'api/jobs') result = { jobs, enabled, automation }
+        else if (input.path === 'api/email-changes') result = { records: emailRecords }
+        else if (input.path === 'api/email-begin') {
+          emailRecords.push({ requestId: data.requestId, email: data.email, newEmail: data.newEmail, status: 'running', step: 'email_code', message: '换绑验证码已发送，请输入新邮箱收到的验证码', createdAt: 1, hasCredentials: false })
+          emailSecrets.set(data.requestId, `${data.newEmail}----${data.password}----${data.totpSecret}`)
+          result = { records: emailRecords }
+        }
+        else if (input.path === 'api/email-code') {
+          const record = emailRecords.find(r => r.requestId === data.requestId)
+          record.status = 'success'; record.step = 'email_verify'; record.message = '邮箱换绑成功，新邮箱、原密码与原 2FA 密钥已保存'; record.hasCredentials = true
+          result = { records: emailRecords }
+        }
+        else if (input.path === 'api/email-reveal') result = { credentials: emailSecrets.get(data.requestId) }
+        else if (input.path === 'api/email-delete') {
+          emailRecords.splice(emailRecords.findIndex(r => r.requestId === data.requestId), 1); emailSecrets.delete(data.requestId)
+          result = { records: emailRecords }
+        }
         else if (input.path === 'api/config') {
           if (window.__failConfig) throw new Error('保存开关失败')
           enabled = data.enabled
@@ -203,7 +220,35 @@ try {
     assert.ok(size.scroll <= size.width + 1, JSON.stringify(size)); assert.deepEqual(errors, [])
     await page.screenshot({ path: resolve(root, `.cache/reauth-ui/import-${width}.png`), fullPage: true })
     console.log(`PASS group filters, logout confirmation, config save and import payload/secret clearing at ${width}px`)
-
+    await scope.getByRole('button', { name: '账户邮箱换绑', exact: true }).click()
+    await scope.getByRole('button', { name: '登录并发送换绑验证码', exact: true }).waitFor({ state: 'visible' })
+    await paste('粘贴换绑登录资料', `old@example.com---- private password ----${pastedSecret}`)
+    assert.equal(await scope.getByLabel('换绑原邮箱', { exact: true }).inputValue(), 'old@example.com')
+    assert.equal(await scope.getByLabel('换绑账号密码', { exact: true }).inputValue(), ' private password ')
+    await scope.getByLabel('换绑新邮箱', { exact: true }).fill('new@example.com')
+    await scope.getByLabel('换绑 IP 代理', { exact: true }).fill('socks5://fixture:pass@127.0.0.1:21001')
+    await scope.getByRole('button', { name: '登录并发送换绑验证码', exact: true }).click()
+    await scope.getByLabel('邮箱验证码', { exact: true }).waitFor()
+    const changeBody = await child.evaluate(() => JSON.parse(window.__calls.find(c => c.path === 'api/email-begin').body))
+    assert.equal(changeBody.newEmail, 'new@example.com'); assert.equal(changeBody.proxyUrl, 'socks5://fixture:pass@127.0.0.1:21001')
+    await scope.getByRole('button', { name: '账号重新授权', exact: true }).click()
+    await scope.getByRole('button', { name: '账户邮箱换绑', exact: true }).click()
+    await scope.getByLabel('邮箱验证码', { exact: true }).fill('445566')
+    await scope.getByRole('button', { name: '确认换绑并保存资料', exact: true }).click()
+    await scope.getByText('换绑成功', { exact: true }).waitFor()
+    assert.equal(await scope.getByLabel('换绑账号密码', { exact: true }).inputValue(), '')
+    assert.equal(await scope.getByLabel('换绑账号 2FA 密钥', { exact: true }).inputValue(), '')
+    assert.ok(!(await scope.getByRole('region', { name: '账户邮箱换绑', exact: true }).innerText()).includes('private password'))
+    assert.equal(await child.evaluate(() => window.__calls.filter(c => c.path === 'api/email-reveal').length), 0)
+    await scope.getByRole('button', { name: '查看已保存资料', exact: true }).click()
+    assert.equal(await scope.getByLabel('已保存换绑资料', { exact: true }).inputValue(), `new@example.com---- private password ----${pastedSecret}`)
+    await scope.getByRole('button', { name: '隐藏资料', exact: true }).click()
+    await scope.getByRole('button', { name: '删除记录', exact: true }).click()
+    await scope.getByRole('dialog', { name: '删除换绑记录', exact: true }).getByRole('button', { name: '确认删除', exact: true }).click()
+    await scope.getByText('暂无换绑记录', { exact: true }).waitFor()
+    const emailSize = await child.evaluate(() => ({ width: document.documentElement.clientWidth, scroll: document.documentElement.scrollWidth }))
+    assert.ok(emailSize.scroll <= emailSize.width + 1, JSON.stringify(emailSize)); assert.deepEqual(errors, [])
+    console.log(`PASS email change paste, proxy, manual code, session resume, saved credential reveal/hide/delete at ${width}px`)
 
     await page.close()
   }

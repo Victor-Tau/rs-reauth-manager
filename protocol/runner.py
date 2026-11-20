@@ -74,6 +74,10 @@ def workspace_ids_from_text(text, original):
 
 
 def run(data):
+    if data.get("mode") == "change_email":
+        from change_email import run_change_email
+        run_change_email(data, emit)
+        return
     if data.get("mode") == "logout":
         from logout import run_logout
         run_logout(data, emit)
@@ -368,13 +372,13 @@ def main():
     logging.disable(logging.CRITICAL)
     parent = os.getppid()
     def watchdog():
-        deadline = time.monotonic() + 420
+        deadline = time.monotonic() + 900
         while time.monotonic() < deadline and os.getppid() == parent:
             time.sleep(1)
         os._exit(0)
     threading.Thread(target=watchdog, daemon=True).start()
     try:
-        raw = sys.stdin.read(65537)
+        raw = sys.stdin.readline(65537)
         if len(raw) > 65536:
             raise ValueError("credentials")
         data = json.loads(raw)

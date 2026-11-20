@@ -2,6 +2,7 @@
 
 mod automation;
 mod diagnostics;
+mod email_change;
 mod host;
 mod importing;
 mod logout;
@@ -159,6 +160,7 @@ struct Manager {
     worker: Option<worker::Worker>,
     recovered: bool,
     imports: std::collections::BTreeMap<String, importing::Import>,
+    email_change: Option<email_change::Pending>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -242,6 +244,12 @@ fn registration() -> ManagementRegistration {
             ("GET", "api/options"),
             ("POST", "api/import"),
             ("POST", "api/import-batch"),
+            ("GET", "api/email-changes"),
+            ("POST", "api/email-begin"),
+            ("POST", "api/email-code"),
+            ("POST", "api/email-cancel"),
+            ("POST", "api/email-reveal"),
+            ("POST", "api/email-delete"),
             ("POST", "api/config"),
             ("POST", "api/submit"),
             ("POST", "api/logout"),
@@ -434,6 +442,7 @@ impl Manager {
         if self.recovered {
             return Ok(());
         }
+        email_change::recover(host).await?;
         let (mut queue, version) = host::load(host).await?;
         let mut changed = false;
         for job in &mut queue.jobs {
@@ -455,6 +464,10 @@ impl Manager {
     }
     async fn tick(&mut self, host: &HostClient) -> Result<(), PluginFault> {
         self.recover(host).await?;
+        email_change::tick(self, host).await?;
+        if self.email_change.is_some() {
+            return Ok(());
+        }
         let (mut queue, version) = host::load(host).await?;
         self.imports
             .retain(|id, _| queue.jobs.iter().any(|j| j.request_id == *id && j.active()));
@@ -715,6 +728,7 @@ async fn handle(
         return match call.request.path.as_str() {
             "api/accounts" => rows(&call.host).await,
             "api/options" => importing::options(&call.host).await,
+            "api/email-changes" => email_change::list(&call.host).await,
             "api/jobs" => {
                 let queue = host::load(&call.host).await?.0;
                 Ok(json!({"jobs":queue.jobs,"enabled":queue.enabled,"automation":queue.automation}))
@@ -724,6 +738,33 @@ async fn handle(
     }
     if call.request.method != "POST" {
         return Err(fault("请求方法不支持"));
+    }
+    if call.request.path == "api/email-begin" {
+        return email_change::begin(manager, &call.host, &call.payload).await;
+    }
+    if [
+        "api/email-code",
+        "api/email-cancel",
+        "api/email-reveal",
+        "api/email-delete",
+    ]
+    .contains(&call.request.path.as_str())
+    {
+        email_change::tick(manager, &call.host).await?;
+        return email_change::action(manager, &call.host, &call.request.path, &call.payload).await;
+    }
+    if manager.email_change.is_some()
+        && [
+            "api/import",
+            "api/import-batch",
+            "api/submit",
+            "api/logout",
+            "api/force-submit",
+            "api/free-fallback",
+        ]
+        .contains(&call.request.path.as_str())
+    {
+        return Err(fault("邮箱换绑会话正在进行，请先完成或取消换绑"));
     }
     if call.request.path == "api/runtime-check" {
         if call.payload != b"{}" {
@@ -755,6 +796,7 @@ async fn handle(
         }
         queue.enabled = request.enabled;
         if !queue.enabled {
+            email_change::cancel(manager, &call.host).await?;
             for job in &mut queue.jobs {
                 if job.active() {
                     job.finish("cancelled", "插件已关闭，已停止队列");
@@ -1004,6 +1046,9 @@ async fn handle(
         "api/cancel" => {
             let request: Cancel =
                 serde_json::from_slice(&call.payload).map_err(|_| fault("取消参数无效"))?;
+            if request.request_id.is_none() {
+                email_change::cancel(manager, &call.host).await?;
+            }
             for job in &mut queue.jobs {
                 if job.active()
                     && request
@@ -1047,6 +1092,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         worker: None,
         recovered: false,
         imports: Default::default(),
+        email_change: None,
     }));
     let background = Arc::clone(&manager);
     let shutdown = Arc::clone(&manager);
@@ -1082,6 +1128,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut manager = shutdown.lock().await;
     if let Some(mut worker) = manager.worker.take() {
         let _ = worker.child.kill().await;
+    }
+    if let Some(mut pending) = manager.email_change.take() {
+        let _ = pending.worker.child.kill().await;
     }
     let cleanup = manager.runtime.cleanup();
     result?;

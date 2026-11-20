@@ -19,9 +19,11 @@ pub struct Output {
     pub step: String,
     pub result: Option<Value>,
     pub logs: Vec<crate::diagnostics::LogEntry>,
+    pub closed: bool,
 }
 pub struct Worker {
     pub child: Child,
+    pub input: Option<tokio::process::ChildStdin>,
     pub output: Arc<Mutex<Output>>,
     pub started: u64,
     pub flow: String,
@@ -211,9 +213,19 @@ impl Runtime {
             .await
             .map_err(|_| fault("协议进程不可用"))?;
         stdin
-            .shutdown()
+            .write_all(b"\n")
             .await
             .map_err(|_| fault("协议进程不可用"))?;
+        let interactive = input["mode"] == "change_email";
+        let input = if interactive {
+            Some(stdin)
+        } else {
+            stdin
+                .shutdown()
+                .await
+                .map_err(|_| fault("协议进程不可用"))?;
+            None
+        };
         let output = Arc::new(Mutex::new(Output::default()));
         let target = Arc::clone(&output);
         tokio::spawn(async move {
@@ -244,6 +256,10 @@ impl Runtime {
                             Some("login") => "login",
                             Some("mfa") => "mfa",
                             Some("logout") => "logout",
+                            Some("email_login_code") => "email_login_code",
+                            Some("email_code") => "email_code",
+                            Some("email_begin") => "email_begin",
+                            Some("email_verify") => "email_verify",
                             _ => "running",
                         }
                         .into();
@@ -260,7 +276,7 @@ impl Runtime {
                     }
                     Some(
                         "complete" | "free_fallback" | "forced_workspace" | "forced_free"
-                        | "logout_complete" | "error",
+                        | "logout_complete" | "email_complete" | "error",
                     ) => {
                         data.result = Some(value);
                         break;
@@ -268,9 +284,13 @@ impl Runtime {
                     _ => break,
                 }
             }
+            if let Ok(mut data) = target.lock() {
+                data.closed = true;
+            }
         });
         Ok(Worker {
             child,
+            input,
             output,
             started: crate::host::now(),
             flow,

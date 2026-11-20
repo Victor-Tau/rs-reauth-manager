@@ -27,6 +27,7 @@ const proxies = [{ name: 'Fixture Proxy', hasAuthentication: true, id: 'proxy_de
 const accountProxies = new Map()
 const importFlows = new Map(), importTransports = new Map(), importUpdates = []
 let importCompleteFailure = false, importUpdateFailure = false
+let failEmailConfirmationSave = false
 const groups = [{ id: 'g1', name: 'Team' }, { id: 'g2', name: 'Shared Group' }]
 let proxyPageSize = 200, memberPageSize = 200, invalidProxyPage = false
 function pageOf(items, requested, size) {
@@ -82,12 +83,20 @@ async function callback(meta, payload) {
   }
   if (meta.method === 'host.state.get') return result(meta.id, { record: records.get(data.key) || null })
   if (meta.method === 'host.state.put') {
+    if (failEmailConfirmationSave && data.key === 'email-changes' && data.value.some(r => r.status === 'verifying')) return result(meta.id, {})
     const old = records.get(data.key)
     assert.equal(data.expected_version, old?.version ?? null)
     const version = (old?.version || 0) + 1
     const serialized = JSON.stringify(data.value)
     assert.ok(Buffer.byteLength(serialized) <= 262144, 'Private state exceeds the manifest value limit')
-    for (const secret of ['fixture-password', 'fixture:pass', 'secret-code', 'refreshToken', 'authorizationUrl', 'callbackUrl', 'fallback-private-rt', 'access_token', 'id_token', 'refresh_token', 'fixture-cookie']) assert.ok(!serialized.includes(secret), `Persistent state leaked ${secret}`)
+    for (const secret of ['fixture-password', 'fixture:pass', 'secret-code', 'refreshToken', 'authorizationUrl', 'callbackUrl', 'fallback-private-rt', 'access_token', 'id_token', 'refresh_token', 'fixture-cookie']) {
+      if (data.key === 'email-changes' && secret === 'fixture-password') {
+        for (const record of data.value) {
+          assert.ok(!JSON.stringify({ ...record, credentials: null }).includes(secret))
+          if (record.credentials) assert.ok(['verifying', 'success', 'review'].includes(record.status))
+        }
+      } else assert.ok(!serialized.includes(secret), `Persistent state leaked ${secret}`)
+    }
     records.set(data.key, { value: structuredClone(data.value), version, schema_version: 1 })
     return result(meta.id, { version })
   }
@@ -201,7 +210,7 @@ const check = name => { passed++; console.log(`PASS ${name}`) }
 try {
   await start()
   check('RPC v7 handshake uses SDK default stage budgets')
-  const reg = JSON.parse((await call('management.register', {}, Buffer.alloc(0), 'registration')).payload.toString()); assert.equal(reg.resources.length, 3); assert.equal(reg.routes.length, 13); assert.ok(reg.routes.some(r => r.method === 'POST' && r.path === 'api/logout')); assert.ok(reg.routes.some(r => r.method === 'POST' && r.path === 'api/import-batch')); assert.ok(!reg.resources.some(r => r.path.includes('runtime'))); check('Only UI resources are exposed, protocol runtime stays private')
+  const reg = JSON.parse((await call('management.register', {}, Buffer.alloc(0), 'registration')).payload.toString()); assert.equal(reg.resources.length, 3); assert.equal(reg.routes.length, 19); assert.ok(reg.routes.some(r => r.method === 'POST' && r.path === 'api/logout')); assert.ok(reg.routes.some(r => r.method === 'POST' && r.path === 'api/import-batch')); assert.ok(reg.routes.some(r => r.path === 'api/email-begin')); assert.ok(!reg.resources.some(r => r.path.includes('runtime'))); check('Only UI resources are exposed, protocol runtime stays private')
   const largeContext = { method: 'GET', uri: '/plugin/api/jobs', http_version: 'HTTP/1.1', headers: [{ name: 'x-fixture', value: Buffer.alloc(70000, 'x').toString('base64') }], peer_addr: null, client_ip: null }
   const contextual = await call('management.handle', { method: 'GET', path: 'api/jobs', query: '', content_type: null, headers: [] }, Buffer.alloc(0), 'management', largeContext)
   assert.equal(contextual.result.status, 200); assert.ok(!contextual.payload.includes('fixture-private-context')); check('RPC v7 carries large request context separately from metadata and business JSON')
@@ -558,6 +567,61 @@ try {
   await request('config', { enabled: true, automation: { ...logoutAutoConfig, enabled: false } })
   await stop(); await start(); assert.equal(records.get('queue').value.auto_attempts.logout_good, 9007199254740991)
   check('Logout intent blocks automatic relogin, including disabled-account scans and plugin restart')
+
+  const emailBody = (prefix = 'email_login') => ({ requestId: randomUUID(), email: `${prefix}@example.com`, password: 'fixture-password', totpSecret: 'GEZDGNBVGY3TQOJQ', newEmail: `${prefix}_new@example.com`, proxyUrl: 'http://fixture:pass@127.0.0.1:21001' })
+  const emailRecord = id => records.get('email-changes').value.find(r => r.requestId === id)
+  async function emailWait(id, predicate) {
+    for (let i = 0; i < 70; i++) { await tick(); if (predicate(emailRecord(id))) return emailRecord(id); await sleep(25) }
+    throw new Error('Email flow did not reach expected state: ' + JSON.stringify({ ...emailRecord(id), credentials: null }))
+  }
+  assert.equal((await request('email-begin', { ...emailBody(), newEmail: 'bad' })).status, 400)
+  assert.equal((await request('email-begin', { ...emailBody(), proxyUrl: 'ftp://invalid' })).status, 400)
+  const emailStart = emailBody()
+  assert.equal((await request('email-begin', emailStart)).status, 200)
+  assert.equal((await request('email-begin', emailStart)).status, 200)
+  assert.equal((await request('email-begin', emailBody('email_other'))).status, 400)
+  assert.equal((await submit(['good'])).status, 400)
+  await emailWait(emailStart.requestId, r => r.step === 'email_login_code')
+  assert.equal(emailRecord(emailStart.requestId).credentials, null)
+  assert.equal((await request('email-code', { requestId: emailStart.requestId, code: 'bad' })).status, 400)
+  assert.equal((await request('email-code', { requestId: emailStart.requestId, code: '112233' })).status, 200)
+  await emailWait(emailStart.requestId, r => r.step === 'email_code')
+  assert.equal(emailRecord(emailStart.requestId).credentials, null)
+  failEmailConfirmationSave = true
+  assert.equal((await request('email-code', { requestId: emailStart.requestId, code: '445566' })).status, 400)
+  assert.equal(emailRecord(emailStart.requestId).status, 'running'); assert.equal(emailRecord(emailStart.requestId).credentials, null)
+  failEmailConfirmationSave = false
+  assert.equal((await request('email-code', { requestId: emailStart.requestId, code: '445566' })).status, 200)
+  await emailWait(emailStart.requestId, r => r.status === 'success')
+  const savedEmail = `${emailStart.newEmail}----fixture-password----GEZDGNBVGY3TQOJQ`
+  assert.equal(emailRecord(emailStart.requestId).credentials, savedEmail)
+  const emailList = await request('email-changes')
+  assert.ok(!JSON.stringify(emailList).includes('fixture-password')); assert.ok(!JSON.stringify(emailList).includes('GEZDGNBVGY3TQOJQ'))
+  assert.equal((await request('email-reveal', { requestId: emailStart.requestId })).value.credentials, savedEmail)
+  assert.equal((await request('email-code', { requestId: emailStart.requestId, code: '445566' })).status, 400)
+  check('Email change keeps a single proxy session through manual login and change codes, saves credentials and hides secrets from listings')
+  await stop(); await start()
+  assert.equal((await request('email-reveal', { requestId: emailStart.requestId })).value.credentials, savedEmail)
+  const lostEmail = emailBody('email_lost')
+  await request('email-begin', lostEmail); await emailWait(lostEmail.requestId, r => r.step === 'email_code')
+  await request('email-code', { requestId: lostEmail.requestId, code: '445566' })
+  await emailWait(lostEmail.requestId, r => r.status === 'review')
+  assert.ok(emailRecord(lostEmail.requestId).credentials)
+  assert.ok(!JSON.stringify((await request('email-changes')).value).includes('fixture-password'))
+  check('Lost confirmation response preserves new credentials for review and never replays the change')
+  const restartEmail = emailBody('email_restart')
+  await request('email-begin', restartEmail); await emailWait(restartEmail.requestId, r => r.step === 'email_code')
+  await request('email-code', { requestId: restartEmail.requestId, code: '445566' })
+  await stop(); await start(); await request('email-changes')
+  assert.equal(emailRecord(restartEmail.requestId).status, 'review'); assert.ok(emailRecord(restartEmail.requestId).credentials)
+  const cancelEmail = emailBody('email_cancel')
+  await request('email-begin', cancelEmail); await emailWait(cancelEmail.requestId, r => r.step === 'email_code')
+  assert.equal((await request('email-delete', { requestId: cancelEmail.requestId })).status, 400)
+  await request('config', { enabled: false })
+  assert.equal(emailRecord(cancelEmail.requestId).status, 'cancelled'); assert.equal(emailRecord(cancelEmail.requestId).credentials, null)
+  assert.equal((await request('email-code', { requestId: cancelEmail.requestId, code: '445566' })).status, 400)
+  await request('email-delete', { requestId: emailStart.requestId }); assert.equal(emailRecord(emailStart.requestId), undefined)
+  check('Email records survive restart, pending confirmation becomes review, disabling kills the session, and completed records can be deleted')
 
   await stop(); assert.equal(errors, ''); console.log(`Verified ${passed} protocol scenarios`)
 } catch (error) { child?.kill(); console.error(error); process.exitCode = 1 }

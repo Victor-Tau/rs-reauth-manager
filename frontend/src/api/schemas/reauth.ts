@@ -1,4 +1,4 @@
-import type { Account, Job, AutomationConfig, Options } from '../../types'
+import type { Account, Job, AutomationConfig, Options, EmailChangeRecord } from '../../types'
 import { isRecord } from '../request'
 
 export function parseConfig(value: unknown): { enabled: boolean; automation?: AutomationConfig } {
@@ -54,4 +54,17 @@ export function parseOptions(value: unknown): Options {
     || !Array.isArray(value.proxies) || !value.proxies.every(p => isRecord(p) && ['id', 'name', 'endpoint'].every(k => typeof p[k] === 'string') && typeof p.enabled === 'boolean' && typeof p.hasAuthentication === 'boolean'))
     throw new Error('导入选项格式无效')
   return value as unknown as Options
+}
+
+export function parseEmailChanges(value: unknown): { records: EmailChangeRecord[] } {
+  if (!isRecord(value) || !Array.isArray(value.records) || value.records.length > 100 || !value.records.every(r => isRecord(r)
+    && ['requestId', 'email', 'newEmail', 'step', 'message'].every(k => typeof r[k] === 'string')
+    && typeof r.status === 'string' && ['running', 'verifying', 'success', 'failed', 'review', 'interrupted', 'cancelled'].includes(r.status)
+    && typeof r.createdAt === 'number' && Number.isSafeInteger(r.createdAt) && r.createdAt >= 0 && typeof r.hasCredentials === 'boolean'))
+    throw new Error('邮箱换绑记录格式无效')
+  return value as unknown as { records: EmailChangeRecord[] }
+}
+export function parseEmailCredentials(value: unknown): string {
+  if (!isRecord(value) || typeof value.credentials !== 'string' || value.credentials.length > 2000) throw new Error('换绑资料格式无效')
+  return value.credentials
 }
