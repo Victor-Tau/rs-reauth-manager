@@ -1,4 +1,4 @@
-import type { AutomationConfig, ImportRequest, EmailChangeRequest } from '../../types'
+import type { EmailCodePolicy, AutomationConfig, ImportRequest, EmailChangeRequest } from '../../types'
 import { request } from '../request'
 import { parseAccounts, parseConfig, parseJobs, parseTick, parseOptions, parseEmailChanges, parseEmailCredentials, parseEmailSettings } from '../schemas/reauth'
 
@@ -11,7 +11,7 @@ export const api = {
   emailCancel: (requestId: string) => request('POST', 'api/email-cancel', { requestId }).then(parseEmailChanges),
   emailReveal: (requestId: string) => request('POST', 'api/email-reveal', { requestId }).then(parseEmailCredentials),
   emailDelete: (requestId: string) => request('POST', 'api/email-delete', { requestId }).then(parseEmailChanges),
-  setConfig: (enabled: boolean, automation?: AutomationConfig) => request('POST', 'api/config', { enabled, ...(automation ? { automation } : {}) }).then(parseConfig),
+  setConfig: (enabled: boolean, automation?: AutomationConfig, emailCodePolicy?: EmailCodePolicy) => request('POST', 'api/config', { enabled, ...(emailCodePolicy ? { emailCodePolicy } : {}), ...(automation ? { automation } : {}) }).then(parseConfig),
   options: () => request('GET', 'api/options').then(parseOptions),
   importAccount: (input: ImportRequest) => request('POST', 'api/import', input).then(parseJobs),
   importBatch: (requestId: string, accounts: ImportRequest[]) => request('POST', 'api/import-batch', { requestId, accounts }).then(parseJobs),

@@ -24,7 +24,7 @@ class CodexLoginTests(unittest.TestCase):
     def execute(self, *, plan="team", mode="import", target="", state="fixture",
                 mfa_status=200, password_status=200, session_email=EMAIL,
                 workspaces=None, landing="/log-in-or-create-account", cookie=True, bounce=False, verify_original=False, token_workspace=None,
-                email_status=None, repeat_email=False):
+                email_status=None, repeat_email=False, email_policy="wait"):
         calls, messages, sessions = [], [], []
         choices = workspaces if workspaces is not None else [
             {"id": "team-workspace", "name": "Example Team", "kind": "organization"},
@@ -128,7 +128,7 @@ class CodexLoginTests(unittest.TestCase):
                     raise AssertionError("Unexpected offline request: " + method + " " + url)
                 return types.SimpleNamespace(status_code=status, url=url, headers=headers, text=json.dumps(body), json=lambda: body)
 
-        data = {"mode": mode, "email": EMAIL, "notes": f"{EMAIL}----fixture-password----{SECRET}", "authorizationUrl": desktop_url(), "accountId": target, "proxy": ""}
+        data = {"emailCodePolicy": email_policy, "mode": mode, "email": EMAIL, "notes": f"{EMAIL}----fixture-password----{SECRET}", "authorizationUrl": desktop_url(), "accountId": target, "proxy": ""}
         if verify_original:
             data["userId"] = "original-user"
         with patch.object(chatgpt_client, "create_http_session", side_effect=lambda **kw: Session()), \
@@ -215,6 +215,12 @@ class CodexLoginTests(unittest.TestCase):
         messages, calls = self.execute(plan='plus', mode='reauth', target='personal-workspace', verify_original=True, email_status=200, state='wrong')
         self.assertEqual(messages[-1]['event'], 'error')
         self.assertFalse(any(url.endswith('/oauth/token') for _, _, url, _ in calls))
+
+    def test_stop_policy_never_waits_submits_code_or_exchanges_tokens(self):
+        messages, calls = self.execute(plan='plus', mode='reauth', target='personal-workspace', verify_original=True, email_status=200, email_policy='stop')
+        self.assertEqual(messages[-1]['diagnostic']['reason'], 'email_code_stopped')
+        self.assertFalse(any(m.get('step') == 'reauth_email_code' for m in messages))
+        self.assertFalse(any(u.endswith(('/email-otp/validate', '/oauth/token')) for _, _, u, _ in calls))
 
     def test_mfa_email_challenge_import_reports_human_step(self):
         messages, calls = self.execute(email_status=200)

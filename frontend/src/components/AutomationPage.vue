@@ -4,16 +4,18 @@ import { ZButton } from '@codex-proxy/ui/button'
 import { ZCard } from '@codex-proxy/ui/card'
 import Notice from './Notice.vue'
 import { ZCheckbox } from '@codex-proxy/ui/checkbox'
+import { ZSelect } from '@codex-proxy/ui/select'
 import { ZInput } from '@codex-proxy/ui/input'
 import { ZSwitch } from '@codex-proxy/ui/switch'
 import { api } from '../api'
 import { defaultAutomation } from '../types'
-import type { Account, AccountGroup } from '../types'
+import type { Account, AccountGroup, EmailCodePolicy } from '../types'
 import { planKey, planLabel, statusText } from '../format'
 const props = defineProps<{ enabled: boolean; accounts: Account[] }>()
 const emit = defineEmits<{ saved: [] }>()
 const config = ref(defaultAutomation()), groups = ref<AccountGroup[]>([])
 const ready = ref(false), loading = ref(true), saving = ref(false), error = ref(''), saved = ref(false)
+const emailCodePolicy = ref<EmailCodePolicy>('wait')
 const interval = ref('15'), cooldown = ref('24')
 const statuses = ['error', 'normal', 'quota_paused', 'quota_exhausted', 'rate_limited'].map(value => ({ value, label: statusText({ status: value, enabled: true } as Account) }))
 const plans = computed(() => [...new Set(['free', 'plus', 'pro', 'team', 'business', 'unknown', ...props.accounts.map(a => planKey(a.planType)), ...config.value.plans])])
@@ -26,6 +28,7 @@ async function load() {
   loading.value = true; error.value = ''; ready.value = false
   try {
     const [state, options] = await Promise.all([api.jobs(), api.options()])
+    emailCodePolicy.value = state.emailCodePolicy
     config.value = state.automation || defaultAutomation(); groups.value = options.groups
     interval.value = String(config.value.intervalMinutes); cooldown.value = String(config.value.cooldownHours); ready.value = true
   } catch (e) { error.value = (e as Error).message }
@@ -38,7 +41,7 @@ async function save() {
   if (!Number.isInteger(minutes) || minutes < 1 || minutes > 1440 || !Number.isInteger(hours) || hours < 1 || hours > 168) { error.value = '扫描间隔为 1–1440 分钟，冷却时间为 1–168 小时'; return }
   if (!c.statuses.length || !c.allGroups && !c.groupIds.length && !c.includeUngrouped || !c.allPlans && !c.plans.length) { error.value = '请至少选择一种状态、一个分组范围和一种订阅'; return }
   saving.value = true
-  try { const result = await api.setConfig(props.enabled, { ...c, intervalMinutes: minutes, cooldownHours: hours }); if (result.automation) config.value = result.automation; saved.value = true; emit('saved') }
+  try { const result = await api.setConfig(props.enabled, { ...c, intervalMinutes: minutes, cooldownHours: hours }, emailCodePolicy.value); if (result.automation) config.value = result.automation; saved.value = true; emit('saved') }
   catch (e) { error.value = (e as Error).message }
   finally { saving.value = false }
 }
@@ -52,6 +55,10 @@ onMounted(load)
     <div v-if="loading || error"><ZButton :loading="loading" @click="load">读取配置与分组</ZButton></div>
     <form v-if="!loading" @submit.prevent="save">
       <fieldset :disabled="saving || !ready" class="settings-fields">
+        <ZCard as="div" class="settings-card" title="重新授权邮箱验证码">
+          <label class="field-label">要求邮箱验证码时<ZSelect v-model="emailCodePolicy" :options="[{ value: 'wait', label: '等待手动输入验证码' }, { value: 'stop', label: '直接停止任务' }]" aria-label="重新授权邮箱验证码处理方式" /></label>
+          <p class="muted">适用于手动和自动重新授权，保存后对新启动的任务生效。等待模式下，在账号重新授权页输入验证码，仍受单号 420 秒超时限制；停止模式下结束当前任务并继续队列。</p>
+        </ZCard>
         <ZCard as="div" class="settings-card" title="基本设置" description="自动授权默认关闭，更新插件不会自动登录">
           <div class="settings-fields">
             <ZSwitch v-model="config.enabled" label="开启自动重新授权" aria-label="开启自动重新授权" />

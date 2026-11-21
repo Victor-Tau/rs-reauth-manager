@@ -147,6 +147,9 @@ def run(data):
             return super()._oauth_drive_external_login_for_continue(**kwargs)
 
         def _oauth_complete_email_otp_for_continue(self, *, continue_url, mail_client, **kwargs):
+            if data.get('emailCodePolicy', 'wait') == 'stop':
+                self.last_oauth_error = 'email_otp_stopped_by_policy'
+                return ''
             if self.email_code_submitted:
                 self.last_oauth_error = 'email_otp_verification_failed'
                 return ''

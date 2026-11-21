@@ -13,13 +13,14 @@ export function installPreview() {
   const emailCredentials = new Map<string, string>()
   let emailSuffix = ''
   let automation = defaultAutomation()
+  let emailCodePolicy = 'wait'
   const diagnostics = ['创建 2FA 验证挑战：上游未成功创建 2FA 验证挑战，并非已确认验证码错误（最后响应 HTTP 403）', '提交 2FA 动态码：上游限制登录频率，不自动重试（最后响应 HTTP 429）', '密码验证：请求超时，保留原代理，不自动重试', '2FA 验证未通过，请检查原账号备注']
   jobs.push(...diagnostics.map((message, i): Job => ({ requestId: `preview-diagnostic:${i}`, accountId: `acct_preview_${i + 1}`, status: 'failed', step: 'failed', message, startedAt: Date.now() - 10000, finishedAt: Date.now() })))
   const encode = (body: unknown) => ({ status: 200, contentType: 'application/json', body: new TextEncoder().encode(JSON.stringify(body)).buffer as ArrayBuffer })
   window.codexProxyPlugin = { version: 2, theme, async request(input) {
     const body = input.body ? JSON.parse(input.body) : {}
     if (input.path === 'api/accounts') return encode({ accounts })
-    if (input.path === 'api/jobs') return encode({ jobs, enabled, automation })
+    if (input.path === 'api/jobs') return encode({ jobs, enabled, automation, emailCodePolicy })
     if (input.path === 'api/options') return encode({ groups: [{ id: 'preview-primary', name: '示例部署组' }, { id: 'preview-shared', name: '跨区域共享账号组' }], proxies: [{ id: 'preview-proxy', name: '示例代理', endpoint: 'http://127.0.0.1:21001', enabled: true, hasAuthentication: false }] })
     if (input.path === 'api/email-changes') return encode({ records: [...emailChanges].reverse() })
     if (input.path === 'api/email-settings') {
@@ -63,11 +64,12 @@ export function installPreview() {
       return encode({ jobs })
     }
     if (input.path === 'api/config') {
+      if (body.emailCodePolicy) emailCodePolicy = body.emailCodePolicy
       enabled = body.enabled
       if (!enabled) for (const r of emailChanges) if (r.status === 'running') { r.status = 'cancelled'; r.message = '插件已关闭'; emailCredentials.delete(r.requestId) }
       if (body.automation) automation = body.automation
       if (!enabled) for (const j of jobs) if (['queued', 'running'].includes(j.status)) { j.status = j.step = 'cancelled'; j.message = '插件已关闭，已停止队列'; j.finishedAt = Date.now() }
-      return encode({ enabled, automation })
+      return encode({ enabled, automation, emailCodePolicy })
     }
     if (!enabled && ['api/submit', 'api/logout', 'api/force-submit', 'api/free-fallback'].includes(input.path)) throw new Error('插件已关闭，请先打开插件开关')
     if (input.path === 'api/logout') {

@@ -1,9 +1,15 @@
-import type { Account, Job, AutomationConfig, Options, EmailChangeRecord } from '../../types'
+import type { Account, Job, EmailCodePolicy, AutomationConfig, Options, EmailChangeRecord } from '../../types'
 import { isRecord } from '../request'
 
-export function parseConfig(value: unknown): { enabled: boolean; automation?: AutomationConfig } {
+function parseEmailCodePolicy(value: unknown): EmailCodePolicy {
+  if (value === undefined) return 'wait'
+  if (value !== 'wait' && value !== 'stop') throw new Error('邮箱验证码处理配置无效')
+  return value
+}
+
+export function parseConfig(value: unknown): { enabled: boolean; automation?: AutomationConfig; emailCodePolicy: EmailCodePolicy } {
   if (!isRecord(value) || typeof value.enabled !== 'boolean') throw new Error('插件开关状态无效')
-  return { enabled: value.enabled, ...(value.automation === undefined ? {} : { automation: parseAutomation(value.automation) }) }
+  return { emailCodePolicy: parseEmailCodePolicy(value.emailCodePolicy), enabled: value.enabled, ...(value.automation === undefined ? {} : { automation: parseAutomation(value.automation) }) }
 }
 
 const nullableString = (value: unknown) => value === null || typeof value === 'string'
@@ -31,11 +37,11 @@ export function parseAccounts(value: unknown): { accounts: Account[] } {
     throw new Error('插件账号列表格式无效')
   return { accounts: value.accounts }
 }
-export function parseJobs(value: unknown): { jobs: Job[]; enabled?: boolean; automation?: AutomationConfig } {
+export function parseJobs(value: unknown): { jobs: Job[]; enabled?: boolean; automation?: AutomationConfig; emailCodePolicy: EmailCodePolicy } {
   if (!isRecord(value) || !Array.isArray(value.jobs) || !value.jobs.every(job))
     throw new Error('插件任务列表格式无效')
   if (value.enabled !== undefined && typeof value.enabled !== 'boolean') throw new Error('插件开关状态无效')
-  return { jobs: value.jobs, ...(value.enabled === undefined ? {} : { enabled: value.enabled }), ...(value.automation === undefined ? {} : { automation: parseAutomation(value.automation) }) }
+  return { emailCodePolicy: parseEmailCodePolicy(value.emailCodePolicy), jobs: value.jobs, ...(value.enabled === undefined ? {} : { enabled: value.enabled }), ...(value.automation === undefined ? {} : { automation: parseAutomation(value.automation) }) }
 }
 export function parseTick(value: unknown): { ok: true } {
   if (!isRecord(value) || value.ok !== true) throw new Error('插件任务推进结果无效')

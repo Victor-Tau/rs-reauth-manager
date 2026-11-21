@@ -4,6 +4,8 @@ export interface Job { kind?: string; label?: string; automatic?: boolean; reque
 export interface Bridge { readonly version: 2; readonly theme: 'light' | 'dark'; request(input: { method: 'GET' | 'POST'; path: string; contentType?: string; body?: string }): Promise<{ status: number; contentType: string; body: ArrayBuffer }> }
 declare global { interface Window { codexProxyPlugin?: Bridge } }
 
+export type EmailCodePolicy = 'wait' | 'stop'
+
 export interface AutomationConfig {
   enabled: boolean; intervalMinutes: number; cooldownHours: number
   allGroups: boolean; groupIds: string[]; includeUngrouped: boolean

@@ -97,6 +97,14 @@ impl Job {
         self.log(message);
     }
 }
+#[derive(Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum EmailCodePolicy {
+    #[default]
+    Wait,
+    Stop,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Queue {
     jobs: Vec<Job>,
@@ -104,6 +112,8 @@ pub struct Queue {
     enabled: bool,
     #[serde(default)]
     automation: automation::Automation,
+    #[serde(default, rename = "emailCodePolicy")]
+    email_code_policy: EmailCodePolicy,
     #[serde(default)]
     last_scan_at: u64,
     #[serde(default)]
@@ -152,6 +162,7 @@ impl Default for Queue {
             jobs: vec![],
             enabled: true,
             automation: automation::Automation::default(),
+            email_code_policy: EmailCodePolicy::default(),
             last_scan_at: 0,
             auto_attempts: Default::default(),
         }
@@ -193,6 +204,8 @@ struct ReauthEmailCode {
 struct Config {
     enabled: bool,
     automation: Option<automation::Automation>,
+    #[serde(rename = "emailCodePolicy")]
+    email_code_policy: Option<EmailCodePolicy>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -702,7 +715,7 @@ impl Manager {
                 let proxy=proxy(host,&a).await?;
                 let start=admin(host,"POST","/api/admin/accounts/oauth/start",Some(json!({"provider":"openai","name":a["name"],"accountId":a["id"]}))).await?;
                 let flow=start["flowId"].as_str().ok_or_else(||fault("RS 授权流程无效"))?.to_owned();
-                let input=json!({"mode":"reauth","notes":a["notes"],"email":a["email"],"proxy":proxy,"authorizationUrl":start["authorizationUrl"],"accountId":a["accountId"],"userId":a["userId"],"forceWorkspaceId":job.force_workspace_id,"forceFree":job.free_fallback});
+                let input=json!({"mode":"reauth","emailCodePolicy":queue.email_code_policy,"notes":a["notes"],"email":a["email"],"proxy":proxy,"authorizationUrl":start["authorizationUrl"],"accountId":a["accountId"],"userId":a["userId"],"forceWorkspaceId":job.force_workspace_id,"forceFree":job.free_fallback});
                 self.runtime.start(input,flow,json!({"settings":settings(&a),"credentialRevision":a["_credentialRevision"]}),job.request_id.clone()).await
             }.await;
             match result {
@@ -750,7 +763,7 @@ async fn handle(
             "api/email-settings" => email_change::settings(&call.host, None).await,
             "api/jobs" => {
                 let queue = host::load(&call.host).await?.0;
-                Ok(json!({"jobs":queue.jobs,"enabled":queue.enabled,"automation":queue.automation}))
+                Ok(json!({"jobs":queue.jobs,"enabled":queue.enabled,"automation":queue.automation,"emailCodePolicy":queue.email_code_policy}))
             }
             _ => Err(fault("路由不存在")),
         };
@@ -816,6 +829,9 @@ async fn handle(
                 }
             }
         }
+        if let Some(policy) = request.email_code_policy {
+            queue.email_code_policy = policy;
+        }
         queue.enabled = request.enabled;
         if !queue.enabled {
             email_change::cancel(manager, &call.host).await?;
@@ -830,7 +846,7 @@ async fn handle(
             manager.worker.take();
             manager.imports.clear();
         }
-        return Ok(json!({"enabled":queue.enabled,"automation":queue.automation}));
+        return Ok(json!({"enabled":queue.enabled,"automation":queue.automation,"emailCodePolicy":queue.email_code_policy}));
     }
     let (mut queue, version) = host::load(&call.host).await?;
     match call.request.path.as_str() {

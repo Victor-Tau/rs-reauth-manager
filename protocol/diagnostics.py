@@ -34,6 +34,7 @@ REASONS = {
     'session_login_required': ('human', 'session_login_required'),
     'email_otp_requires_mail_client': ('human', 'email_code_required'),
     'email_otp_client_required': ('human', 'email_code_required'),
+    'email_otp_stopped_by_policy': ('human', 'email_code_stopped'),
     'email_otp_provider_required': ('human', 'email_code_required'),
     'email_otp_verification_failed': ('human', 'email_verification_failed'),
     'oauth_cloudflare_challenge': ('human', 'security_challenge'),

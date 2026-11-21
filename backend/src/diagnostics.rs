@@ -134,6 +134,7 @@ pub fn message(output: &Value, fallback: &str) -> String {
         "mfa_code_rejected" => "上游拒绝 2FA 动态码，可能已失效、被使用或与验证器不匹配",
         "mfa_verification_failed" => "2FA 验证流程未完成，未取得明确的验证码拒绝原因",
         "primary_factor_required" => "上游要求先完成密码或邮箱验证，不能只使用 2FA",
+        "email_code_stopped" => "上游要求邮箱验证码，已按配置停止当前任务",
         "email_code_required" => "上游要求邮箱验证码，当前任务不支持人工补码续跑",
         "email_code_rejected" => "上游拒绝邮箱验证码",
         "email_verification_failed" => "邮箱验证流程未完成",
