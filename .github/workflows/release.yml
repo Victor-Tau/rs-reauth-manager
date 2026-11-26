@@ -1,0 +1,62 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: '1'
+      RAYON_NUM_THREADS: '1'
+      UV_THREADPOOL_SIZE: '1'
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: '9.12.2'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/cargo-zigbuild
+            backend/target
+            .cache/runtime
+            .cache/cpr-target
+          key: release-linux-${{ hashFiles('backend/Cargo.lock', 'rust-toolchain.toml', 'protocol/requirements-linux.txt', 'scripts/prepare_runtime.py') }}
+          restore-keys: release-linux-
+      - name: Build, package and check on one CPU
+        run: |
+          cpu=$(python -c 'import os; print(min(os.sched_getaffinity(0)))')
+          taskset -c "$cpu" bash scripts/ci-release.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reauth-manager-linux-x86_64
+          path: |
+            dist/*
+            verification/artifact.json
+          if-no-files-found: error
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/*.tar.gz.sha256 \
+            --verify-tag --title "账号重新授权 $GITHUB_REF_NAME · CPR 3.55.3" \
+            --notes-file .cache/release-notes.md --latest
