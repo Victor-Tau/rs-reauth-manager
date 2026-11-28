@@ -137,7 +137,7 @@ dependencies = [
 [[package]]
 name = "gateway-plugin-sdk"
 version = "0.1.0"
-source = "git+https://github.com/zyycn/codex-proxy-rs.git?rev=ef45165d8d30cfaee65558807b401541503d8aea#ef45165d8d30cfaee65558807b401541503d8aea"
+source = "git+https://github.com/zyycn/codex-proxy-rs.git?rev=533a415a9984691608799e9d2d5bf79968b3e32f#533a415a9984691608799e9d2d5bf79968b3e32f"
 dependencies = [
  "base64 0.23.1",
  "semver",
@@ -377,7 +377,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "reauth-manager"
-version = "0.14.18"
+version = "0.14.19"
 dependencies = [
  "base64 0.22.1",
  "flate2",
